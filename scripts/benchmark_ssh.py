@@ -20,15 +20,19 @@ def main():
     p.add_argument("--size",type=int,default=4096)
     p.add_argument("--scan-workers",type=int,default=8)
     p.add_argument("--output",type=Path)
+    p.add_argument("--remote-base", default="~/.cache", help="Parent for isolated test state and files")
+    p.add_argument("--files-per-dir", type=int, default=1000)
+    p.add_argument("--depth", type=int, default=1)
     p.add_argument("--delta",action="store_true",help="Measure overwrite, insertion, and deletion of the first large file")
     args=p.parse_args()
     if args.files<1 or args.size<1 or not 1<=args.scan_workers<=64:p.error("invalid benchmark size or worker count")
+    if args.files_per_dir < 1 or not 1 <= args.depth <= 16:p.error("invalid directory shape")
     if args.delta and args.size<2*1024*1024:p.error("--delta requires --size of at least 2 MiB")
     binary=str(Path(args.binary).resolve())
     def ssh(*cmd,input=None):
         return subprocess.check_output(["ssh","-o","BatchMode=yes",args.ssh,shlex.join(cmd)],input=input,text=True)
     def py(code):return ssh("python3","-",input=code)
-    remote=py("import tempfile,os;print(tempfile.mkdtemp(prefix='ysync-benchmark-',dir=os.path.expanduser('~/.cache')))\n").strip()
+    remote=py(f"import tempfile,os;print(tempfile.mkdtemp(prefix='ysync-benchmark-',dir=os.path.expanduser({args.remote_base!r})))\n").strip()
     rs=remote+"/state";rf=remote+"/files"
     remote_proc=None;local_proc=None
     with tempfile.TemporaryDirectory(prefix="ysync-lan-") as tmp:
@@ -49,10 +53,12 @@ def main():
             host=next(s.split(" ",1)[1] for s in settings.splitlines() if s.startswith("hostname "))
             cli("peer","add",bid,"--address",f"{host}:{port}","--folder","bench")
             peer=dict(id=aid,name="benchmark-mac",address=None,approved=True,folders=["bench"])
-            py(f"import json,pathlib\np=pathlib.Path({rs!r})/'config.json'\nc=json.loads(p.read_text());c['peers'].append(json.loads({json.dumps(peer)!r}));c['rescan_secs']=5;p.write_text(json.dumps(c))\n")
+            py(f"import json,pathlib\np=pathlib.Path({rs!r})/'config.json'\nc=json.loads(p.read_text());c['peers'].append(json.loads({json.dumps(peer)!r}));c['rescan_secs']=3600;p.write_text(json.dumps(c))\n")
             payload=os.urandom(args.size)
             for i in range(args.files):
-                d=files/f"d{i//1000:05}";d.mkdir(exist_ok=True);(d/f"f{i:08}.bin").write_bytes(payload)
+                d=files/f"d{i//args.files_per_dir:05}"
+                for depth in range(1,args.depth):d=d/f"level{depth}"
+                d.mkdir(parents=True,exist_ok=True);(d/f"f{i:08}.bin").write_bytes(payload)
             started=time.monotonic()
             with (base/"local.log").open("w") as log:
                 remote_proc=subprocess.Popen(["ssh","-o","BatchMode=yes",args.ssh,shlex.join([args.remote_binary,"--home",rs,"serve"])],stdout=subprocess.DEVNULL,stderr=(base/"remote.log").open("w"))
@@ -69,12 +75,13 @@ def main():
                 seconds=time.monotonic()-started
                 # Hash every received file on the server, including shape/count checks.
                 digest=hashlib.sha256(payload).hexdigest()
-                check=py(f"import pathlib,hashlib\nr=pathlib.Path({rf!r});n={args.files}\nfor i in range(n):\n p=r/f'd{{i//1000:05}}'/f'f{{i:08}}.bin'\n assert hashlib.sha256(p.read_bytes()).hexdigest()=={digest!r},p\nprint(n)\n")
+                check=py(f"import pathlib,hashlib\nr=pathlib.Path({rf!r});n={args.files}\nfor i in range(n):\n p=r/f'd{{i//{args.files_per_dir}:05}}'\n for depth in range(1,{args.depth}):p=p/f'level{{depth}}'\n p=p/f'f{{i:08}}.bin'\n assert hashlib.sha256(p.read_bytes()).hexdigest()=={digest!r},p\nprint(n)\n")
                 assert int(check)==args.files
                 delta_results=[]
                 if args.delta:
-                    target=files/'d00000'/'f00000000.bin'
-                    remote_target=rf+'/d00000/f00000000.bin'
+                    relative=Path('d00000').joinpath(*(f'level{d}' for d in range(1,args.depth)), 'f00000000.bin')
+                    target=files/relative
+                    remote_target=rf+'/'+str(relative)
                     deadline=time.monotonic()+30
                     while True:
                         before=json.loads(rcli('status','--json'))
@@ -110,7 +117,7 @@ def main():
                             bootstrap_seconds=round(seconds,3),files_per_second=round(args.files/seconds,1),
                             payload_MB_per_second=round(args.files*args.size/seconds/1e6,2),
                             reverse_edit_latency_ms=round((time.monotonic()-edit_start)*1000,1),
-                            verified_all_payloads=True,environment=f"Mac to {args.ssh}; remote ~/.cache disk-backed roots; existing workloads left running",remote_reconciliation_secs=5)
+                            verified_all_payloads=True,environment=f"Mac to {args.ssh}; remote {args.remote_base} disk-backed roots; existing workloads left running",remote_reconciliation_secs=3600,files_per_dir=args.files_per_dir,depth=args.depth)
                 if args.delta:result['delta_edits']=delta_results
                 print(json.dumps(result,indent=2))
                 if args.output:args.output.parent.mkdir(parents=True,exist_ok=True);args.output.write_text(json.dumps(result,indent=2)+"\n")

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.3
+
+- Flush sibling directories concurrently with a reusable pool capped at eight disk workers. Finish each deeper level before its parents, and finish all file/directory flushes before acknowledging or committing the cursor. Failed flushes join in-flight work and abort acknowledgement.
+- Reuse the same bounded pool for file-content flushes instead of creating new threads every batch. Scan worker settings remain independent.
+- Add SSH benchmark options for the destination filesystem and directory shape; use hourly reconciliation to measure native watcher behavior without five-second rescan interference.
+
 ## 0.2.2
 
 - Match canonically equivalent Unicode filenames and parent directories to their existing local spelling before receive negotiation, publication, and durability checks. This fixes macOS/Linux composed-versus-decomposed filename stalls without renaming working files.

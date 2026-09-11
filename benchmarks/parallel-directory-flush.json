@@ -1,0 +1,62 @@
+[
+  {
+    "files": 2048,
+    "bytes": 8388608,
+    "scan_workers": 2,
+    "bootstrap_seconds": 11.39,
+    "files_per_second": 179.8,
+    "payload_MB_per_second": 0.74,
+    "reverse_edit_latency_ms": 313.6,
+    "verified_all_payloads": true,
+    "environment": "Mac to home-omarchy; remote /home/rhuk/Projects/grav/.ysync disk-backed roots; existing workloads left running",
+    "remote_reconciliation_secs": 3600,
+    "files_per_dir": 16,
+    "depth": 3,
+    "variant": "baseline-1"
+  },
+  {
+    "files": 2048,
+    "bytes": 8388608,
+    "scan_workers": 2,
+    "bootstrap_seconds": 7.575,
+    "files_per_second": 270.4,
+    "payload_MB_per_second": 1.11,
+    "reverse_edit_latency_ms": 324.8,
+    "verified_all_payloads": true,
+    "environment": "Mac to home-omarchy; remote /home/rhuk/Projects/grav/.ysync disk-backed roots; existing workloads left running",
+    "remote_reconciliation_secs": 3600,
+    "files_per_dir": 16,
+    "depth": 3,
+    "variant": "parallel-1"
+  },
+  {
+    "files": 2048,
+    "bytes": 8388608,
+    "scan_workers": 2,
+    "bootstrap_seconds": 8.124,
+    "files_per_second": 252.1,
+    "payload_MB_per_second": 1.03,
+    "reverse_edit_latency_ms": 300.3,
+    "verified_all_payloads": true,
+    "environment": "Mac to home-omarchy; remote /home/rhuk/Projects/grav/.ysync disk-backed roots; existing workloads left running",
+    "remote_reconciliation_secs": 3600,
+    "files_per_dir": 16,
+    "depth": 3,
+    "variant": "parallel-2"
+  },
+  {
+    "files": 2048,
+    "bytes": 8388608,
+    "scan_workers": 2,
+    "bootstrap_seconds": 11.593,
+    "files_per_second": 176.7,
+    "payload_MB_per_second": 0.72,
+    "reverse_edit_latency_ms": 304.9,
+    "verified_all_payloads": true,
+    "environment": "Mac to home-omarchy; remote /home/rhuk/Projects/grav/.ysync disk-backed roots; existing workloads left running",
+    "remote_reconciliation_secs": 3600,
+    "files_per_dir": 16,
+    "depth": 3,
+    "variant": "baseline-2"
+  }
+]

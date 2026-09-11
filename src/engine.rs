@@ -844,17 +844,29 @@ pub fn sync_directories(root: &Root, entries: &[Entry]) -> Result<()> {
     }
     let mut dirs: Vec<_> = dirs.into_iter().collect();
     dirs.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
-    for p in dirs {
-        match root.dir.open_dir(&p) {
-            // cap-std uses O_PATH directory handles on Linux; fsync needs a readable descriptor.
-            Ok(dir) => dir
-                .open(".")?
-                .into_std()
-                .sync_all()
-                .with_context(|| format!("flushing directory {}", p.display()))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
-        }
+    // Siblings can flush together, but every deeper level must be durable
+    // before its parents. Sharing an in-flight filesystem commit avoids
+    // serial disk waits on trees with many small files and directories.
+    let mut remaining = dirs.as_slice();
+    while let Some(first) = remaining.first() {
+        let depth = first.components().count();
+        let count = remaining.partition_point(|p| p.components().count() == depth);
+        let (level, rest) = remaining.split_at(count);
+        crate::durability::parallel(level, |p| {
+            root.scan_checkpoint()?;
+            match root.dir.open_dir(p) {
+                // cap-std uses O_PATH directory handles on Linux; fsync needs a readable descriptor.
+                Ok(dir) => dir
+                    .open(".")?
+                    .into_std()
+                    .sync_all()
+                    .with_context(|| format!("flushing directory {}", p.display()))?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+            Ok(())
+        })?;
+        remaining = rest;
     }
     Ok(())
 }

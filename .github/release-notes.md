@@ -1,9 +1,7 @@
-Fix a macOS/Linux synchronization stall caused by canonically equivalent Unicode filenames (for example, an accented letter encoded as one character versus a base letter plus a combining accent).
+Improve small-file transfers by flushing sibling directories concurrently, using a reusable pool capped at eight disk workers. Directory levels still commit from children to parents, and acknowledgements still wait for durable files, directories, and the index cursor. Conflict preservation and overwrite checks are retained.
 
-Receivers now use the existing local filename and parent-directory spelling for equivalent names. Working files are not renamed. Content conflicts remain pending for explicit review. Case-only collisions, duplicate batch path keys, and distinct physical files with equivalent Unicode names are still rejected.
+Two pairs of isolated Mac-to-Linux tests on the Projects Btrfs SSD transferred 2,048 files of 4 KiB across a three-level tree: 177–180 files/sec on 0.2.1 versus 252–270 files/sec with this change (about 46% higher mean throughput). All payload hashes and reverse watcher edits passed. The real Grav transfer remained active, so these results are workload-specific, not a general network throughput claim.
 
-Regression tests cover equivalent existing files, later edits in both directions, new children under differently encoded directory names, conflict preservation, ignored entries, and distinct Linux aliases. The 0.2.1 progress/cancellation fix is retained.
+Includes the 0.2.2 Unicode filename fix. Upgrade both peers with `brew update && brew upgrade ysync`, or `cargo install --git https://github.com/yetidevworks/ysync.git --tag v0.2.3 --locked ysync`. Stop services before upgrading. Wire protocol remains 4.
 
-Upgrade both peers with `brew update && brew upgrade ysync`, or install with `cargo install --git https://github.com/yetidevworks/ysync.git --tag v0.2.2 --locked ysync`. Stop services before upgrading. Wire protocol remains 4; identities, configuration, index history and pending conflicts are retained.
-
-Experimental release. The larger live-folder reconciliation is still being evaluated; existing content conflicts require review.
+Experimental release; larger live-folder reconciliation remains under evaluation, and content conflicts require review.

@@ -696,25 +696,9 @@ fn receive_batch(w: &mut Wire, shared: &Shared, expected_folder: &str) -> Result
                 move || {
                     let flushes: Vec<_> = partials.values().map(|p| &p.file).collect();
                     // Overlap durable file flushes with a bounded worker count. All must finish before publication.
-                    std::thread::scope(|scope| -> Result<()> {
-                        let workers = 8.min(flushes.len());
-                        if workers == 0 {
-                            return Ok(());
-                        }
-                        let mut handles = Vec::new();
-                        for group in flushes.chunks(flushes.len().div_ceil(workers)) {
-                            handles.push(scope.spawn(move || -> std::io::Result<()> {
-                                for file in group {
-                                    file.sync_all()?;
-                                }
-                                Ok(())
-                            }));
-                        }
-                        for handle in handles {
-                            handle
-                                .join()
-                                .map_err(|_| anyhow::anyhow!("flush worker panicked"))??;
-                        }
+                    crate::durability::parallel(&flushes, |file| {
+                        control.checkpoint()?;
+                        file.sync_all()?;
                         Ok(())
                     })?;
                     let _guard = loop {
