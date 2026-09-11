@@ -48,6 +48,11 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Review preserved incoming versions and explicitly resolve conflicts.
+    Conflict {
+        #[command(subcommand)]
+        command: ConflictCmd,
+    },
     /// Manage synchronized folders. IDs must match on both devices.
     Folder {
         #[command(subcommand)]
@@ -78,6 +83,20 @@ enum FolderCmd {
     },
     Resume {
         id: String,
+    },
+}
+#[derive(Subcommand)]
+enum ConflictCmd {
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Keep the current local version (after any manual merge). Stop the daemon first.
+    Resolve {
+        folder: String,
+        id: String,
+        #[arg(long, required = true)]
+        keep_local: bool,
     },
 }
 #[derive(Subcommand)]
@@ -157,6 +176,32 @@ fn main() -> Result<()> {
         }
         Cmd::WatchCapacity { json } => ysync::capacity::print_report(&home, json)?,
         Cmd::Id => println!("{}", config::identity(&home)?.0),
+        Cmd::Conflict { command } => match command {
+            ConflictCmd::List { json } => {
+                let conflicts = ysync::conflicts::list(&store::open(&home)?)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&conflicts)?);
+                } else {
+                    for conflict in conflicts {
+                        println!(
+                            "{}  {}  {:?}\n  incoming: {:?}",
+                            conflict.id, conflict.folder, conflict.incoming.path, conflict.payload
+                        );
+                    }
+                }
+            }
+            ConflictCmd::Resolve {
+                folder,
+                id,
+                keep_local: true,
+            } => {
+                ysync::conflicts::keep_local(&home, &folder, &id)?;
+                println!(
+                    "Kept the current local version. The explicit resolution will propagate when synchronization resumes."
+                );
+            }
+            ConflictCmd::Resolve { .. } => bail!("explicit --keep-local is required"),
+        },
         Cmd::Serve => daemon::serve(&home)?,
         Cmd::Monitor => daemon::monitor(&home, false)?,
         Cmd::Status { json } => {

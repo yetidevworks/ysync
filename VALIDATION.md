@@ -180,6 +180,15 @@ Reproduce with `python3 scripts/benchmark_watch.py --binary /absolute/path/to/ys
 
 `dist/ysync-macos-arm64` and `dist/ysync-linux-x86_64` are release builds, with checksums in `dist/SHA256SUMS`. The Linux build was cross-compiled with `cargo zigbuild` and exercised on the actual server. The tested Linux executable also remains at `/home/rhuk/.cache/ysync-eval.caGcvu/ysync`; it is not registered as a service.
 
-The packaged binaries now use wire protocol 3; both peers must be updated. Identities, configuration, indexes, and partial-buffer formats remain compatible. Delta reuse is scoped to the existing destination file, with signatures generated on demand. See the README for setup and limitations, including no cross-file deduplication or persisted chunk index, unbounded retained versions/obsolete partials, and unsupported metadata. See [ROADMAP.md](ROADMAP.md) for the next work.
+Those historical packaged binaries used wire protocol 3; both peers needed that update. Identities, configuration, indexes, and partial-buffer formats remain compatible. Delta reuse is scoped to the existing destination file, with signatures generated on demand. See the README for setup and limitations, including no cross-file deduplication or persisted chunk index, unbounded retained versions/obsolete partials, and unsupported metadata. See [ROADMAP.md](ROADMAP.md) for the next work.
 
-The watcher update keeps wire protocol 3 and can be deployed independently on an existing protocol 3 peer. The delta timing measurements above predate these watcher scheduling changes.
+That watcher update kept wire protocol 3 and could be deployed independently on an existing protocol 3 peer. The delta timing measurements above predate these watcher scheduling changes.
+
+
+## 0.2.0 conflict safety
+
+The macOS suite passes 43 unit tests and 11 integration tests with native watchers required. Regression coverage includes independently indexed content, stale versions, concurrent edits and permissions, deletion versus an unscanned edit, edits during transfer and payload negotiation, and atomic creation when another application creates the destination first. The end-to-end test leaves both offline edits in place, verifies durable pending conflicts and archived incoming bytes, rejects resolution while the daemon runs, and uses the CLI to explicitly choose a version that then converges on both peers.
+
+A separate process probe connected the installed 0.1.1 binary to the new 0.2.0 binary using isolated roots. Wire protocol 3 was refused by protocol 4 before any entries transferred, and both pre-existing files remained unchanged. Both real Projects roots remained paused, with their services stopped, throughout these checks. This does not retroactively resolve earlier conflicts or demonstrate completion of the real-folder sync.
+
+Automatic replacement now requires causal version history; independent differences require an explicit choice. Destination checks catch changes before publication, and new regular files use atomic creation without replacement. These checks do not provide application-consistent snapshots or eliminate every race with applications writing through existing open file handles. Earlier conflict archives remain available for separate review.

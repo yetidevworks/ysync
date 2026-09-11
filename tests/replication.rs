@@ -295,31 +295,76 @@ fn two_daemons_pair_replicate_watch_conflict_and_revoke() {
     b.write("hello.txt", b"offline edit B");
     a.start();
     b.start();
-    wait("offline conflict convergence", &a, &b, || {
-        let x = fs::read(a.path("hello.txt")).unwrap();
-        let y = fs::read(b.path("hello.txt")).unwrap();
-        x == y && (a.path(".ysync/conflicts").is_dir() || b.path(".ysync/conflicts").is_dir())
-    });
-    let mut preserved = Vec::new();
-    for d in [&a, &b] {
-        if let Ok(entries) = fs::read_dir(d.path(".ysync/conflicts")) {
-            for e in entries.flatten() {
-                if let Ok(data) = fs::read(e.path()) {
-                    preserved.push(data);
-                }
-            }
-        }
-    }
-    let winner = fs::read(a.path("hello.txt")).unwrap();
-    let loser = if winner == b"offline edit A" {
+    let pending =
+        |d: &Device| ysync::conflicts::list(&ysync::store::open(d.state.path()).unwrap()).unwrap();
+    wait(
+        "offline edits preserved for explicit resolution",
+        &a,
+        &b,
+        || !pending(&a).is_empty() && !pending(&b).is_empty(),
+    );
+    assert!(equals(&a, "hello.txt", b"offline edit A"));
+    assert!(equals(&b, "hello.txt", b"offline edit B"));
+    let conflict = pending(&a)
+        .into_iter()
+        .find(|c| c.incoming.path == "hello.txt")
+        .unwrap();
+    assert_eq!(
+        fs::read(a.path(conflict.payload.as_ref().unwrap())).unwrap(),
         b"offline edit B"
-    } else {
-        b"offline edit A"
+    );
+    assert!(
+        ysync::conflicts::keep_local(a.state.path(), "code", &conflict.id).is_err(),
+        "resolution must reject a running daemon"
+    );
+    a.stop();
+    b.stop();
+    assert_eq!(
+        pending(&a).len(),
+        1,
+        "pending conflicts survive daemon shutdown"
+    );
+    let binary =
+        std::env::var("YSYNC_TEST_BINARY").unwrap_or_else(|_| env!("CARGO_BIN_EXE_ysync").into());
+    let output = Command::new(&binary)
+        .arg("--home")
+        .arg(a.state.path())
+        .args(["conflict", "list", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let listed: Vec<ysync::conflicts::Conflict> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(listed.len(), 1);
+    let resolve = || {
+        let mut command = Command::new(&binary);
+        command.arg("--home").arg(a.state.path()).args([
+            "conflict",
+            "resolve",
+            "code",
+            &conflict.id,
+        ]);
+        command
     };
     assert!(
-        preserved.iter().any(|v| v == loser),
-        "losing edit was not retained"
+        !resolve().output().unwrap().status.success(),
+        "explicit choice must be required"
     );
+    assert!(
+        resolve()
+            .arg("--keep-local")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    a.start();
+    b.start();
+    wait("explicit resolution propagates", &a, &b, || {
+        equals(&b, "hello.txt", b"offline edit A")
+            && pending(&a).is_empty()
+            && pending(&b).is_empty()
+    });
+    settled(&a, &b);
     config::edit(b.state.path(), |c| {
         c.peers[0].approved = false;
         Ok(())

@@ -218,7 +218,7 @@ pub fn observe(root: &Root, path: &str, old: Option<&Entry>, force: bool) -> Res
         stamp: st,
     }))
 }
-fn refresh(
+pub(crate) fn refresh(
     c: &Connection,
     root: &Root,
     path: &str,
@@ -512,31 +512,28 @@ fn scan_impl(
     Ok(count)
 }
 
-pub fn incoming_wins(local: &Entry, remote: &Entry) -> bool {
-    if local.kind == Kind::Deleted && remote.kind != Kind::Deleted {
-        return true;
-    }
-    if remote.kind == Kind::Deleted && local.kind != Kind::Deleted {
-        return false;
-    }
-    let key = |e: &Entry| format!("{:?}:{}:{}:{:?}", e.kind, e.hash, e.mode, e.target);
-    key(remote) > key(local)
-}
 pub fn wants(c: &Connection, root: &Root, remote: &Entry) -> Result<bool> {
     remote.validate()?;
     if root.excluded(&remote.path) {
         return Ok(false);
     }
     let old = store::get(c, &root.folder.id, &remote.path)?;
-    Ok(remote.kind == Kind::File
-        && match old {
-            None => true,
-            Some(local) => match model::relation(&local.clock, &remote.clock) {
-                Relation::Before => !local.same_bytes(remote),
-                Relation::Concurrent => !local.same_bytes(remote), // Preserve the losing branch, even when local wins.
-                _ => false,
-            },
-        })
+    if remote.kind != Kind::File {
+        return Ok(false);
+    }
+    if old.as_ref().is_some_and(|local| {
+        matches!(
+            model::relation(&local.clock, &remote.clock),
+            Relation::After
+        ) || (model::relation(&local.clock, &remote.clock) == Relation::Equal
+            && local.same_content(remote))
+    }) {
+        return Ok(false);
+    }
+    // The destination may have changed before its watcher ran. Recheck its
+    // metadata/cache before negotiation so a retry can fetch a missing payload.
+    let live = observe(root, &remote.path, old.as_ref(), false)?;
+    Ok(live.is_none_or(|local| !local.same_bytes(remote)))
 }
 fn archive(root: &Root, path: &str, area: &str, remove: bool) -> Result<Option<String>> {
     let m = match root.dir.symlink_metadata(path) {
@@ -570,6 +567,29 @@ fn write_metadata(root: &Root, path: &str, value: &impl serde::Serialize) -> Res
     root.dir.open(path)?.into_std().sync_all()?;
     Ok(())
 }
+fn check_destination(root: &Root, path: &str, local: Option<&Entry>) -> Result<()> {
+    let expected = local
+        .filter(|e| e.kind != Kind::Deleted)
+        .map(|e| e.stamp.as_str());
+    let current = match root.dir.symlink_metadata(path) {
+        Ok(meta) => Some(stamp(&meta)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
+    if current.as_deref() != expected {
+        bail!("destination changed before publication; retry required: {path}");
+    }
+    Ok(())
+}
+
+fn publish_new_file(root: &Root, temp: &str, path: &str) -> Result<()> {
+    // Atomic creation without replacement. An editor may create the path after
+    // the last check; a replacing rename would silently overwrite that save.
+    root.dir.hard_link(temp, &root.dir, path)?;
+    root.dir.remove_file(temp)?;
+    Ok(())
+}
+
 pub fn apply(
     c: &Connection,
     root: &Root,
@@ -584,10 +604,9 @@ pub fn apply(
     }
     // A replay or echo cannot change this path. Leave local watcher processing to the scanner.
     if store::get(c, &root.folder.id, &remote.path)?.is_some_and(|e| {
-        matches!(
-            model::relation(&e.clock, &remote.clock),
-            Relation::Equal | Relation::After
-        )
+        model::relation(&e.clock, &remote.clock) == Relation::After
+            || (model::relation(&e.clock, &remote.clock) == Relation::Equal
+                && e.same_content(remote))
     }) {
         return Ok(false);
     }
@@ -597,35 +616,26 @@ pub fn apply(
     let rel = old
         .as_ref()
         .map(|e| model::relation(&e.clock, &remote.clock));
-    if matches!(rel, Some(Relation::After | Relation::Equal)) {
+    if matches!(rel, Some(Relation::After))
+        || (matches!(rel, Some(Relation::Equal))
+            && old.as_ref().is_some_and(|e| e.same_content(remote)))
+    {
         return Ok(false);
     }
-    let conflict = matches!(rel, Some(Relation::Concurrent))
-        && old.as_ref().is_some_and(|e| !e.same_content(remote));
-    let keep_local = conflict && old.as_ref().is_some_and(|e| !incoming_wins(e, remote));
-    let mut next = if keep_local {
-        old.clone().unwrap()
-    } else {
-        remote.clone()
-    };
+    if matches!(rel, Some(Relation::Concurrent | Relation::Equal))
+        && old.as_ref().is_some_and(|e| !e.same_content(remote))
+    {
+        crate::conflicts::save(c, root, old.as_ref().unwrap(), remote, temp)?;
+        // Do not merge clocks: that would falsely claim different working
+        // contents are synchronized and make a later stale copy look newer.
+        return Ok(true);
+    }
+    let mut next = remote.clone();
     if let Some(old) = &old {
         next.clock = model::merge(&old.clock, &remote.clock);
     }
-    if keep_local {
-        if let Some(t) = temp {
-            let dest = format!(".ysync/conflicts/{}", uuid::Uuid::new_v4());
-            root.dir.create_dir_all(".ysync/conflicts")?;
-            root.dir.rename(t, &root.dir, &dest)?;
-            write_metadata(root, &format!("{dest}.json"), remote)?;
-        } else if remote.kind != Kind::Deleted {
-            root.dir.create_dir_all(".ysync/conflicts")?;
-            write_metadata(
-                root,
-                &format!(".ysync/conflicts/{}.json", uuid::Uuid::new_v4()),
-                remote,
-            )?;
-        }
-    } else if old.as_ref().is_some_and(|e| e.same_bytes(remote)) {
+    check_destination(root, &remote.path, old.as_ref())?;
+    if old.as_ref().is_some_and(|e| e.same_bytes(remote)) {
         // Matching content still needs its clocks merged, but chmod (even to the
         // existing mode) changes ctime and emits native metadata notifications.
         // During bootstrap those no-op writes can overflow the watcher queue
@@ -664,12 +674,7 @@ pub fn apply(
                     .symlink_metadata(&remote.path)
                     .is_ok_and(|m| !m.is_dir() || m.is_symlink())
                 {
-                    archive(
-                        root,
-                        &remote.path,
-                        if conflict { "conflicts" } else { "versions" },
-                        true,
-                    )?;
+                    archive(root, &remote.path, "versions", true)?;
                 }
                 root.dir.create_dir_all(&remote.path)?;
             }
@@ -679,23 +684,17 @@ pub fn apply(
                     remote.target.as_ref().context("missing symlink target")?,
                     &temp_link,
                 )?;
-                archive(
-                    root,
-                    &remote.path,
-                    if conflict { "conflicts" } else { "versions" },
-                    false,
-                )?;
+                archive(root, &remote.path, "versions", false)?;
                 root.dir.rename(&temp_link, &root.dir, &remote.path)?;
             }
             Kind::File => {
                 let t = temp.context("file changed during negotiation; retry required")?;
-                archive(
-                    root,
-                    &remote.path,
-                    if conflict { "conflicts" } else { "versions" },
-                    false,
-                )?;
-                root.dir.rename(t, &root.dir, &remote.path)?;
+                if old.as_ref().is_none_or(|e| e.kind == Kind::Deleted) {
+                    publish_new_file(root, t, &remote.path)?;
+                } else {
+                    archive(root, &remote.path, "versions", false)?;
+                    root.dir.rename(t, &root.dir, &remote.path)?;
+                }
             }
         }
         if remote.kind == Kind::Directory {
@@ -711,7 +710,8 @@ pub fn apply(
         next.stamp.clear();
     }
     store::put(c, &root.folder.id, &mut next, 0)?;
-    Ok(conflict)
+    crate::conflicts::clear_resolved(c, &root.folder.id, &next)?;
+    Ok(false)
 }
 
 /// Persist rename/create/delete metadata once per affected directory, before committing the batch cursor.
@@ -1042,6 +1042,240 @@ mod tests {
         std::fs::remove_file(files.path().join(".ysync/marker")).unwrap();
         assert!(scan(&root, state.path(), &id, None, |_| {}).is_err());
     }
+
+    fn staged_remote(
+        root: &Root,
+        base: &Entry,
+        bytes: &[u8],
+        independent: bool,
+    ) -> (Entry, String) {
+        use std::io::Write;
+        let mut remote = base.clone();
+        remote.kind = Kind::File;
+        remote.size = bytes.len() as u64;
+        remote.hash = blake3::hash(bytes).to_hex().to_string();
+        if independent {
+            remote.clock.clear();
+        }
+        remote.clock.insert("a".repeat(64), 1);
+        let (name, mut file) = temp_file(root).unwrap();
+        file.write_all(bytes).unwrap();
+        file.set_permissions(std::fs::Permissions::from_mode(remote.mode))
+            .unwrap();
+        file.sync_all().unwrap();
+        (remote, name)
+    }
+
+    #[test]
+    fn bootstrap_never_replaces_an_unindexed_existing_file() {
+        let (state, files, root, id) = fixture();
+        std::fs::write(files.path().join("file"), b"new Mac work").unwrap();
+        let local = observe(&root, "file", None, true).unwrap().unwrap();
+        let (remote, temp) = staged_remote(&root, &local, b"old Linux snapshot", true);
+        let c = store::open(state.path()).unwrap();
+        assert!(wants(&c, &root, &remote).unwrap());
+        assert!(apply(&c, &root, &id, &remote, Some(&temp)).unwrap());
+        assert_eq!(
+            std::fs::read(files.path().join("file")).unwrap(),
+            b"new Mac work"
+        );
+        let after = store::get(&c, "test", "file").unwrap().unwrap();
+        assert_eq!(
+            model::relation(&after.clock, &remote.clock),
+            Relation::Concurrent
+        );
+        let pending = crate::conflicts::list(&c).unwrap();
+        assert_eq!(pending.len(), 1);
+        let saved = files.path().join(pending[0].payload.as_ref().unwrap());
+        assert_eq!(std::fs::read(&saved).unwrap(), b"old Linux snapshot");
+        drop(c);
+        let c = store::open(state.path()).unwrap();
+        assert!(apply(&c, &root, &id, &remote, None).unwrap());
+        assert_eq!(
+            crate::conflicts::list(&c).unwrap().len(),
+            1,
+            "replays deduplicate"
+        );
+        std::fs::write(files.path().join("file"), b"manual merge").unwrap();
+        crate::conflicts::keep_local(state.path(), "test", &pending[0].id).unwrap();
+        assert_eq!(
+            std::fs::read(files.path().join("file")).unwrap(),
+            b"manual merge"
+        );
+        assert_eq!(std::fs::read(saved).unwrap(), b"old Linux snapshot");
+        let resolved = store::get(&c, "test", "file").unwrap().unwrap();
+        assert_eq!(
+            model::relation(&resolved.clock, &remote.clock),
+            Relation::After
+        );
+        assert!(crate::conflicts::list(&c).unwrap().is_empty());
+    }
+
+    #[test]
+    fn stale_causal_version_cannot_replace_newer_local_work() {
+        let (state, files, root, id) = fixture();
+        std::fs::write(files.path().join("file"), b"base").unwrap();
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        let c = store::open(state.path()).unwrap();
+        let stale = store::get(&c, "test", "file").unwrap().unwrap();
+        std::fs::write(files.path().join("file"), b"newer").unwrap();
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        assert!(!wants(&c, &root, &stale).unwrap());
+        assert!(!apply(&c, &root, &id, &stale, None).unwrap());
+        assert_eq!(std::fs::read(files.path().join("file")).unwrap(), b"newer");
+    }
+
+    #[test]
+    fn edit_during_transfer_becomes_a_conflict_instead_of_being_overwritten() {
+        let (state, files, root, id) = fixture();
+        std::fs::write(files.path().join("file"), b"base").unwrap();
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        let c = store::open(state.path()).unwrap();
+        let base = store::get(&c, "test", "file").unwrap().unwrap();
+        let (remote, temp) = staged_remote(&root, &base, b"remote edit", false);
+        assert!(wants(&c, &root, &remote).unwrap());
+        // Simulate a save after negotiation, before publication, without a scanner pass.
+        std::fs::write(files.path().join("file"), b"new local edit during transfer").unwrap();
+        assert!(apply(&c, &root, &id, &remote, Some(&temp)).unwrap());
+        assert_eq!(
+            std::fs::read(files.path().join("file")).unwrap(),
+            b"new local edit during transfer"
+        );
+        let current = store::get(&c, "test", "file").unwrap().unwrap();
+        assert_eq!(
+            model::relation(&current.clock, &remote.clock),
+            Relation::Concurrent
+        );
+        assert_eq!(crate::conflicts::list(&c).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn changed_destination_after_no_payload_negotiation_retries_without_losing_either_version() {
+        let (state, files, root, id) = fixture();
+        std::fs::write(files.path().join("file"), b"base").unwrap();
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        let mut c = store::open(state.path()).unwrap();
+        let base = store::get(&c, "test", "file").unwrap().unwrap();
+        let (remote, temp) = staged_remote(&root, &base, b"base", false);
+        assert!(!wants(&c, &root, &remote).unwrap());
+        std::fs::write(files.path().join("file"), b"late edit").unwrap();
+        let tx = c.transaction().unwrap();
+        assert!(apply(&tx, &root, &id, &remote, None).is_err());
+        tx.rollback().unwrap();
+        assert_eq!(
+            std::fs::read(files.path().join("file")).unwrap(),
+            b"late edit"
+        );
+        assert!(
+            wants(&c, &root, &remote).unwrap(),
+            "retry must request the missing incoming version"
+        );
+        assert!(apply(&c, &root, &id, &remote, Some(&temp)).unwrap());
+        assert_eq!(
+            std::fs::read(files.path().join("file")).unwrap(),
+            b"late edit"
+        );
+        assert_eq!(crate::conflicts::list(&c).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn remote_delete_cannot_remove_an_unscanned_local_edit() {
+        let (state, files, root, id) = fixture();
+        std::fs::write(files.path().join("file"), b"base").unwrap();
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        let c = store::open(state.path()).unwrap();
+        let mut remote = store::get(&c, "test", "file").unwrap().unwrap();
+        remote.clock.insert("a".repeat(64), 1);
+        remote.kind = Kind::Deleted;
+        remote.hash.clear();
+        remote.size = 0;
+        std::fs::write(files.path().join("file"), b"new local work").unwrap();
+        assert!(apply(&c, &root, &id, &remote, None).unwrap());
+        assert_eq!(
+            std::fs::read(files.path().join("file")).unwrap(),
+            b"new local work"
+        );
+        assert_eq!(
+            crate::conflicts::list(&c).unwrap()[0].incoming.kind,
+            Kind::Deleted
+        );
+    }
+
+    #[test]
+    fn equal_clocks_with_different_bytes_are_not_treated_as_synchronized() {
+        let (state, files, root, id) = fixture();
+        std::fs::write(files.path().join("file"), b"keep local").unwrap();
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        let c = store::open(state.path()).unwrap();
+        let local = store::get(&c, "test", "file").unwrap().unwrap();
+        let (mut remote, temp) = staged_remote(&root, &local, b"legacy divergence", false);
+        remote.clock = local.clock.clone();
+        assert!(wants(&c, &root, &remote).unwrap());
+        assert!(apply(&c, &root, &id, &remote, Some(&temp)).unwrap());
+        assert_eq!(
+            std::fs::read(files.path().join("file")).unwrap(),
+            b"keep local"
+        );
+        assert_eq!(crate::conflicts::list(&c).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn new_file_publication_does_not_replace_a_path_created_after_the_check() {
+        use std::io::Write;
+        let (_state, files, root, _id) = fixture();
+        let (temp, mut file) = temp_file(&root).unwrap();
+        file.write_all(b"incoming").unwrap();
+        check_destination(&root, "file", None).unwrap();
+        std::fs::write(files.path().join("file"), b"new editor save").unwrap();
+        assert!(publish_new_file(&root, &temp, "file").is_err());
+        assert_eq!(
+            std::fs::read(files.path().join("file")).unwrap(),
+            b"new editor save"
+        );
+        assert_eq!(std::fs::read(files.path().join(temp)).unwrap(), b"incoming");
+    }
+    #[test]
+    fn conflicting_permissions_never_chmod_the_working_file_or_link_the_archive() {
+        let (state, files, root, id) = fixture();
+        std::fs::write(files.path().join("file"), b"same bytes").unwrap();
+        std::fs::set_permissions(
+            files.path().join("file"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        let c = store::open(state.path()).unwrap();
+        let mut remote = store::get(&c, "test", "file").unwrap().unwrap();
+        remote.clock = BTreeMap::from([("a".repeat(64), 1)]);
+        remote.mode = 0;
+        assert!(!wants(&c, &root, &remote).unwrap());
+        assert!(apply(&c, &root, &id, &remote, None).unwrap());
+        assert_eq!(root.dir.metadata("file").unwrap().mode() & 0o777, 0o644);
+        let pending = crate::conflicts::list(&c).unwrap();
+        std::fs::write(files.path().join("file"), b"later edit").unwrap();
+        assert_eq!(
+            std::fs::read(files.path().join(pending[0].payload.as_ref().unwrap())).unwrap(),
+            b"same bytes"
+        );
+    }
+
+    #[test]
+    fn independent_type_change_does_not_replace_a_populated_directory() {
+        let (state, files, root, id) = fixture();
+        std::fs::create_dir(files.path().join("dir")).unwrap();
+        std::fs::write(files.path().join("dir/child"), b"keep child").unwrap();
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        let c = store::open(state.path()).unwrap();
+        let local = store::get(&c, "test", "dir").unwrap().unwrap();
+        let (remote, temp) = staged_remote(&root, &local, b"old file at this path", true);
+        assert!(apply(&c, &root, &id, &remote, Some(&temp)).unwrap());
+        assert_eq!(
+            std::fs::read(files.path().join("dir/child")).unwrap(),
+            b"keep child"
+        );
+        assert_eq!(crate::conflicts::list(&c).unwrap().len(), 1);
+    }
+
     #[test]
     fn cached_files_still_reject_symlink_parents_and_detect_replacement() {
         let (_state, files, root, _id) = fixture();
@@ -1075,24 +1309,6 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), files.path().join("escape")).unwrap();
         assert!(root.parents("escape/secret", true).is_err());
         assert!(!outside.path().join("secret").exists());
-    }
-    #[test]
-    fn concurrent_edit_beats_delete() {
-        let e = Entry {
-            path: "x".into(),
-            kind: Kind::File,
-            size: 1,
-            hash: "a".repeat(64),
-            target: None,
-            mode: 0o644,
-            clock: BTreeMap::new(),
-            seq: 0,
-            stamp: String::new(),
-        };
-        let mut d = e.clone();
-        d.kind = Kind::Deleted;
-        assert!(incoming_wins(&d, &e));
-        assert!(!incoming_wins(&e, &d));
     }
     #[test]
     fn unsupported_path_does_not_block_other_files_or_infer_deletions() {

@@ -1,20 +1,16 @@
-Fixes unnecessary filesystem writes during initial reconciliation: entries whose content and permissions already match now merge synchronization history without chmod or file fsync. This removes a source of watcher events, queue overflows, and repeated full scans.
+Safety change: conflicting incoming content no longer automatically replaces a working file. Independently changed or initially different files remain in place on each device; incoming versions are preserved as pending conflicts. Hash ordering and timestamps do not select a winner.
 
-Regression tests cover unchanged file/directory metadata and real permission updates. Wire protocol and state formats are unchanged.
+Known older causal versions are ignored. Ordinary later edits to a shared version still synchronize. Local content is checked before publication, and creation of a new file cannot overwrite a path created during the final publication window.
 
-Upgrade with:
-
-```sh
-brew update
-brew upgrade ysync
-```
-
-Or install with Rust 1.88 or newer:
+New commands:
 
 ```sh
-cargo install --git https://github.com/yetidevworks/ysync.git --tag v0.1.1 --locked ysync
+ysync conflict list
+ysync conflict list --json
+# Stop the daemon first; review/merge the working file before choosing it.
+ysync conflict resolve projects FULL_CONFLICT_ID --keep-local
 ```
 
-Stop the service before upgrading and restart it afterward when ready. Folder pause settings are preserved. This remains experimental: initial backlog, existing-file conflicts, and unreadable paths are not resolved by this patch. Test with copies before enabling important folders.
+**Upgrade both devices.** Protocol 4 refuses protocol 3 peers (0.1.x) before exchanging file batches. Stop services before `brew update && brew upgrade ysync`. Pause settings, identities and indexes are retained; the pending-conflicts table is added automatically. Legacy conflict archives remain on disk for separate review; this release does not undo earlier conflict choices.
 
-Release archives cover ARM64/x86-64 macOS and Linux, with SHA256SUMS. Linux archives require glibc 2.35 or newer; macOS binaries are unsigned.
+This remains experimental. Existing-file conflict review, initial backlog, inaccessible paths, and application-consistent snapshots are still separate concerns. Native archives cover ARM64/x86-64 macOS and Linux; Linux requires glibc 2.35 or newer. Checksums are included.

@@ -2,7 +2,7 @@
 
 Direct, encrypted, bidirectional file synchronization for macOS and Linux. A Rust daemon, a live terminal monitor, explicit device approval, and native user services.
 
-**Status: experimental 0.1.** Use disposable folders or copies while evaluating. This implementation is not yet a proven replacement for Syncthing on a multi-million-file production tree. Do not run two sync engines against the same live folders.
+**Status: experimental 0.2.** Use disposable folders or copies while evaluating. This implementation is not yet a proven replacement for Syncthing on a multi-million-file production tree. Do not run two sync engines against the same live folders.
 
 ## Install
 
@@ -26,13 +26,13 @@ Use Rust/Cargo 1.88 or newer and a C compiler. SQLite is bundled; no separate SQ
 
 ```sh
 cargo install --git https://github.com/yetidevworks/ysync.git \
-  --tag v0.1.1 --locked ysync
+  --tag v0.2.0 --locked ysync
 ysync --version
 ```
 
 Cargo installs the command under `~/.cargo/bin`; make sure that directory is on your PATH. With a rustup installation, `source "$HOME/.cargo/env"` activates it in the current shell. Installation builds the binary but does not start a service or change your sync configuration. This crate is not published to crates.io. Cargo's [Git installation options](https://doc.rust-lang.org/cargo/commands/cargo-install.html) support selecting a tag and using the committed dependency lockfile.
 
-For the latest main branch, replace `--tag v0.1.1` with `--branch main`. To update an installed service: stop it, install the desired tag with `--force`, and start it again. Reinstall the service definition if the binary's installation path changes.
+For the latest main branch, replace `--tag v0.2.0` with `--branch main`. To update an installed service: stop it, install the desired tag with `--force`, and start it again. Reinstall the service definition if the binary's installation path changes.
 
 ### Download a binary
 
@@ -50,13 +50,13 @@ Linux archives require glibc 2.35 or newer. Build with Cargo on older systems. M
 For example, on an Apple Silicon Mac:
 
 ```sh
-curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.1.1/ysync-v0.1.1-aarch64-apple-darwin.tar.gz
-curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.1.1/SHA256SUMS
-shasum -a 256 ysync-v0.1.1-aarch64-apple-darwin.tar.gz
+curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.2.0/ysync-v0.2.0-aarch64-apple-darwin.tar.gz
+curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.2.0/SHA256SUMS
+shasum -a 256 ysync-v0.2.0-aarch64-apple-darwin.tar.gz
 # Compare the result with its matching entry in SHA256SUMS.
-tar -xzf ysync-v0.1.1-aarch64-apple-darwin.tar.gz
+tar -xzf ysync-v0.2.0-aarch64-apple-darwin.tar.gz
 mkdir -p ~/.local/bin
-install -m 755 ysync-v0.1.1-aarch64-apple-darwin/ysync ~/.local/bin/ysync
+install -m 755 ysync-v0.2.0-aarch64-apple-darwin/ysync ~/.local/bin/ysync
 ```
 
 Put `~/.local/bin` on your PATH if you use this location. `ysync --help` shows all commands.
@@ -144,6 +144,30 @@ Linux watch-quota exhaustion preserves successful registrations and reports `par
 
 Folder additions, pause/resume, and approval changes are read while the daemon runs. A changed listening address requires a restart. Remote access is rechecked before each batch and again before publishing received content.
 
+## Conflicts: existing work stays in place
+
+An incoming version can replace an existing working file automatically only when its version vector is causally later. Known older versions are ignored. Independently indexed or concurrently edited content stays at its original working path; the incoming file and a manifest are saved under the folder's `.ysync/conflicts/` directory. Equal vectors with different content are also conflicts, not evidence that the files match. Ordinary later edits to a previously shared version still synchronize automatically.
+
+The receiver rechecks local content before publication, so an edit made during transfer can turn the incoming update into a conflict. Creation of a previously absent regular file uses an atomic no-replace operation; a newly created destination causes a retry. These checks do not provide application-consistent snapshots or coordinate arbitrary editors holding open file handles.
+
+Inspect unresolved versions:
+
+```sh
+ysync conflict list
+ysync conflict list --json
+```
+
+The monitor reports pending conflicts separately from activity counters. Files remain different on the two devices until resolved. The list contains conflicts recorded by 0.2.0 onward; older 0.1.x archives remain on disk for separate review and are not retroactively resolved.
+
+To resolve one conflict, stop the daemon on the device whose current file you want to keep. Review or manually merge that working file, then explicitly select it:
+
+```sh
+brew services stop ysync
+ysync conflict resolve projects FULL_CONFLICT_ID --keep-local
+```
+
+This command does not copy anything over the working file. It records the current local version as a deliberate resolution of the selected incoming version. When synchronization resumes, that decision propagates. To choose incoming content, first review and copy/merge the saved payload into the working file, then run the same explicit resolution command. Archives remain retained. Conflicting edits made after the choice produce a new conflict.
+
 ## Linux watch capacity
 
 `ysync watch-capacity` reports the kernel's per-user watch, instance, and queue limits alongside estimated directory-watch needs from the existing index. `--json` produces a machine-readable report; `--home STATE_DIR` selects an evaluation instance. The report includes paused folders separately so you can size both trees before enabling them. It applies current exclusions to cached directory paths and includes root/control watches. It reads the index without walking source trees, hashing files, or modifying kernel settings.
@@ -221,7 +245,7 @@ Use `ysync --home /absolute/path ...` to select another state directory. It cont
 - **Watching:** native FSEvents on macOS and inotify on Linux via `notify`. Linux registers individual included directories during scanning, before listing their children, and excludes ignored subtrees and internal staging/version directories. One additional control watch observes the folder marker. Directory moves/removals update those registrations; macOS uses a recursive root stream and filters ignored paths in the callback.
 - **Event scheduling:** callbacks do no filesystem reads or hashing. They filter read/open events and ignored paths, retain close-after-write events, and coalesce paths into a bounded 4,096-path set with a one-slot wake signal. Updates wait for 100 ms of quiet, with a one-second maximum batching delay under continuous activity. An ancestor subtree event absorbs queued descendant events. Directory metadata events inspect only the directory entry; file/directory deletion and rename reconcile only affected path ranges in the index, with child tombstones before parent tombstones. Unchanged metadata fingerprints reuse cached hashes, including notifications caused by incoming writes.
 - **Reconciliation and recovery:** startup, explicit ignore-rule changes, missed-event/overflow signals, and the periodic safety interval trigger full reconciliation. Overflow discards the bounded event set in favor of one repair scan and reestablishes native coverage. Unreadable/unsupported paths are reported while accessible files continue indexing; deletion inference is suspended after an incomplete scan. Scoped failures get up to three bounded retries. Watch registration failures fall back to polling and retry with backoff; successful reattachment performs a full reconciliation. Pausing a folder releases its native watcher. Cached roots and ignore matchers avoid rebuilding them during idle wakeups.
-- **Correctness:** causal version vectors distinguish later edits from concurrent edits. Concurrent content conflicts converge to a deterministic winner while preserving the losing content. Concurrent edits beat deletions. Remote bytes are checksummed, staged, and flushed before acknowledgment. Updates use same-filesystem renames; prior content is retained. A crash before acknowledgment causes the batch to be replayed; recovery may conservatively create extra version/conflict records.
+- **Correctness:** causal version vectors distinguish later edits from concurrent edits. Concurrent differences preserve the working version on each device and save the incoming version as a pending conflict. This includes initial pairing, permission/type differences, and edit/delete conflicts. No hash or timestamp chooses a winner. Pending conflicts do not merge version vectors or claim content convergence; only an explicit resolution can choose between independent versions. Remote bytes are checksummed, staged, and flushed before acknowledgment. Updates use same-filesystem renames; prior content is retained. A crash before acknowledgment causes the batch to be replayed; recovery may conservatively create extra version/conflict records.
 - **Paths:** relative paths are validated; reserved state paths and traversal are rejected. Filesystem operations use directory capabilities (`cap-std`). Symlink parents cannot redirect a transfer outside its root. NFC/lowercase name collisions are rejected by the index rather than silently overwriting a differently named file.
 
 The scanner opens checked parent directories one component at a time and reuses the resulting handle for file metadata and reads. Device/inode checks reject a directory replaced while it is being opened. Frequently used index statements are prepared once per connection and reused. This removes repeated root-relative parent walks and SQL compilation without changing the index format or wire protocol.
@@ -256,7 +280,7 @@ The benchmark creates two isolated local instances and reports bootstrap duratio
 
 Run `cargo bench --bench delta --locked` for the synthetic content-defined versus fixed-block comparison, or add `--delta --files 1 --size 33554432` to the SSH benchmark for a 32 MiB test file with three edits.
 
-See [ROADMAP.md](ROADMAP.md) for upcoming performance and operational work. The delta-transfer build uses **wire protocol 3**; update both peers together. Earlier protocol versions are rejected before exchanging transfer batches. The existing identity, configuration, index, and partial-buffer formats remain compatible.
+See [ROADMAP.md](ROADMAP.md) for upcoming performance and operational work. The delta-transfer build uses **wire protocol 4**; update both peers together. Earlier protocol versions are rejected before exchanging transfer batches. Identities, configuration, indexed versions, and partial buffers are retained; a pending-conflicts table is added. Upgrade both devices before reconnecting. Protocol 3 peers (0.1.x) are refused before exchanging batches so their automatic conflict policy cannot participate.
 
 ## License
 

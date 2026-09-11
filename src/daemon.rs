@@ -28,6 +28,8 @@ pub fn now() -> u64 {
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct FolderStatus {
+    #[serde(default)]
+    pub pending_conflicts: u64,
     pub phase: String,
     pub scanned: u64,
     pub files: u64,
@@ -665,7 +667,7 @@ pub fn serve(home: &Path) -> Result<()> {
         .num_threads(cfg.scan_workers)
         .thread_name(|n| format!("ysync-scan-{n}"))
         .build_global()?;
-    store::open(home)?;
+    let status_db = store::open(home)?;
     let lock = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -825,10 +827,14 @@ pub fn serve(home: &Path) -> Result<()> {
                 .iter()
                 .map(|(id, c)| (id.clone(), c.waiting()))
                 .collect();
+            let conflict_counts = crate::conflicts::counts(&status_db).ok();
             let mut status = shared.status.lock().unwrap();
             status.thermal = thermal.clone();
             status.watch_limits = crate::capacity::limits();
             for (id, f) in &mut status.folders {
+                if let Some(counts) = &conflict_counts {
+                    f.pending_conflicts = counts.get(id).copied().unwrap_or(0);
+                }
                 f.scan_waiting_for_cooling = waiting.get(id).copied().unwrap_or(false);
             }
             status.updated = now();
@@ -943,6 +949,12 @@ pub fn monitor(home: &Path, once: bool) -> Result<()> {
                 f.bytes as f64 / 1e9,
                 f.scanned
             );
+            if f.pending_conflicts > 0 {
+                println!(
+                    "    {} pending conflicts: working files preserved; run ysync conflict list",
+                    f.pending_conflicts
+                );
+            }
             if f.scan_waiting_for_cooling {
                 println!(
                     "    COOLING: scan progress retained; waiting for CPU temperature to fall"

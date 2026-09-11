@@ -15,6 +15,8 @@
 
 - [x] Linux watch-capacity handling: read-only index estimates, live shared-limit diagnostics, retained partial coverage on quota exhaustion, and scoped recovery of uncovered subtrees. Raising the shared limit triggers early recovery; real combined-root validation remains.
 
+- [x] Conflict safety: preserve working content for independent/concurrent versions, retain durable pending conflicts, require explicit CLI resolution, and refuse peers using the older automatic conflict policy.
+
 ## Next performance work
 
 Temperature-aware scanner pause/resume is implemented and covered by controlled tests. A scanner CPU/duty budget independent of worker count and a controlled large-root cooling evaluation remain. The first path-opening optimization is measured in VALIDATION.md; larger controlled follow-up remains. Track initial indexing separately from idle watching and scoped edits. Two hash workers and a later 50% CPU quota did not prevent every Linux trial from reaching its 85°C stop threshold. The server deliberately uses a shallow fan curve: keep temperature control optional, and assess efficiency through CPU seconds, disk reads, repeated work, and idle activity.

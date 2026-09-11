@@ -208,7 +208,7 @@ fn hello(shared: &Shared, peer: &str) -> Result<Message> {
         cursors.insert(f.clone(), store::cursor(&c, peer, f)?);
     }
     Ok(Message::Hello {
-        version: 3,
+        version: 4,
         name: cfg.name,
         folders,
         cursors,
@@ -707,7 +707,7 @@ pub fn session(
         w.send(&hello(&shared, &peer)?)?;
         let (remote_folders, mut remote_cursors) = match w.recv()? {
             Message::Hello {
-                version: 3,
+                version: 4,
                 folders,
                 cursors,
                 ..

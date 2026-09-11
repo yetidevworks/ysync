@@ -10,7 +10,9 @@ pub fn open(home: &Path) -> Result<Connection> {
       CREATE TABLE IF NOT EXISTS entries(folder TEXT NOT NULL,path TEXT NOT NULL,path_key TEXT NOT NULL,seq INTEGER NOT NULL,data TEXT NOT NULL,stamp TEXT NOT NULL,seen INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(folder,path),UNIQUE(folder,path_key));
       CREATE INDEX IF NOT EXISTS changes ON entries(folder,seq);
       CREATE TABLE IF NOT EXISTS counters(folder TEXT PRIMARY KEY,value INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS cursors(peer TEXT NOT NULL,folder TEXT NOT NULL,value INTEGER NOT NULL,PRIMARY KEY(peer,folder));")?;
+      CREATE TABLE IF NOT EXISTS cursors(peer TEXT NOT NULL,folder TEXT NOT NULL,value INTEGER NOT NULL,PRIMARY KEY(peer,folder));
+      CREATE TABLE IF NOT EXISTS conflicts(folder TEXT NOT NULL,id TEXT NOT NULL,path TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(folder,id));
+      CREATE INDEX IF NOT EXISTS conflicts_path ON conflicts(folder,path);")?;
     Ok(c)
 }
 pub fn get(c: &Connection, folder: &str, path: &str) -> Result<Option<Entry>> {

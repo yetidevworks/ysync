@@ -1,4 +1,5 @@
 pub mod config;
+pub mod conflicts;
 pub mod daemon;
 pub mod delta;
 pub mod engine;
