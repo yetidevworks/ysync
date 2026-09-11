@@ -9,6 +9,6 @@ First experimental release for macOS and Linux.
 - Native filesystem watching, scoped updates, cached hashes, configurable reconciliation, and bounded parallel hashing.
 - Linux partial watch coverage and capacity diagnostics; optional temperature-aware scanner pause/resume.
 - Terminal monitoring, JSON status, and launchd/systemd user services.
-- Installation from the private Git repository with Cargo, plus native archives for both CPU architectures on macOS and Linux.
+- Installation from the Git repository with Cargo, plus native archives for both CPU architectures on macOS and Linux.
 
 The multi-million-file live-folder trials remain incomplete. See VALIDATION.md and ROADMAP.md for measured behavior and remaining work. This release is not yet a proven replacement for Syncthing on production trees.

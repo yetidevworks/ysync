@@ -1,0 +1,54 @@
+name: Update Homebrew tap
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+    secrets:
+      HOMEBREW_TAP_DEPLOY_KEY:
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: homebrew-tap
+  cancel-in-progress: false
+jobs:
+  update:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Render and push release formula
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          python3 scripts/update_homebrew.py "$RELEASE_TAG" --output "$RUNNER_TEMP/ysync.rb"
+          eval "$(ssh-agent -s)"
+          trap 'ssh-agent -k >/dev/null' EXIT
+          ssh-add - <<< "$TAP_DEPLOY_KEY"
+          unset TAP_DEPLOY_KEY
+          mkdir -p ~/.ssh
+          gh api meta --jq '.ssh_keys[] | "github.com " + .' > ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=yes'
+          git clone git@github.com:yetidevworks/homebrew-ysync.git "$RUNNER_TEMP/tap"
+          cp "$RUNNER_TEMP/ysync.rb" "$RUNNER_TEMP/tap/Formula/ysync.rb"
+          cd "$RUNNER_TEMP/tap"
+          if git diff --quiet -- Formula/ysync.rb; then
+            echo "Formula already matches $RELEASE_TAG"
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Formula/ysync.rb
+          git commit -m "Update ysync to $RELEASE_TAG"
+          git push origin HEAD:main
