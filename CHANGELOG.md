@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1
+
+- Avoid chmod and file fsync when incoming content and permissions already match. Synchronization history still merges, while unchanged files no longer generate metadata events that can overflow watcher queues and trigger repeated full scans during bootstrap.
+- Add regressions for unchanged file/directory metadata and real permission updates.
+
+This fixes one source of scan feedback. Initial-reconciliation backlog, conflict review, and inaccessible paths still require attention on large existing trees.
+
 ## 0.1.0
 
 First experimental release for macOS and Linux.

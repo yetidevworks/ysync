@@ -1,22 +1,20 @@
-First experimental ysync release: encrypted bidirectional sync, native watchers, resume/delta transfers, monitoring, and native user services.
+Fixes unnecessary filesystem writes during initial reconciliation: entries whose content and permissions already match now merge synchronization history without chmod or file fsync. This removes a source of watcher events, queue overflows, and repeated full scans.
 
-Install with Rust 1.88 or newer:
+Regression tests cover unchanged file/directory metadata and real permission updates. Wire protocol and state formats are unchanged.
 
-```sh
-cargo install \
-  --git https://github.com/yetidevworks/ysync.git \
-  --tag v0.1.0 --locked ysync
-```
-
-Or install a prebuilt binary with Homebrew:
+Upgrade with:
 
 ```sh
-# If your Homebrew requires tap trust, run this first:
-# brew trust --formula yetidevworks/ysync/ysync
-brew tap yetidevworks/ysync
-brew install yetidevworks/ysync/ysync
+brew update
+brew upgrade ysync
 ```
 
-Alternatively, download the archive for your CPU/OS, verify it against SHA256SUMS, extract it, and put `ysync` on your PATH. Linux archives use glibc 2.35 or newer. macOS binaries are unsigned; install through Cargo if your local security policy blocks downloaded executables.
+Or install with Rust 1.88 or newer:
 
-Each archive is built on its matching architecture after native-watcher tests and a Cargo installation check. The release remains experimental; see README.md, VALIDATION.md, and ROADMAP.md before enabling synchronization of important folders.
+```sh
+cargo install --git https://github.com/yetidevworks/ysync.git --tag v0.1.1 --locked ysync
+```
+
+Stop the service before upgrading and restart it afterward when ready. Folder pause settings are preserved. This remains experimental: initial backlog, existing-file conflicts, and unreadable paths are not resolved by this patch. Test with copies before enabling important folders.
+
+Release archives cover ARM64/x86-64 macOS and Linux, with SHA256SUMS. Linux archives require glibc 2.35 or newer; macOS binaries are unsigned.

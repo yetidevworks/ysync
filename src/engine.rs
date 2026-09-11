@@ -626,7 +626,13 @@ pub fn apply(
             )?;
         }
     } else if old.as_ref().is_some_and(|e| e.same_bytes(remote)) {
-        if matches!(remote.kind, Kind::File | Kind::Directory) {
+        // Matching content still needs its clocks merged, but chmod (even to the
+        // existing mode) changes ctime and emits native metadata notifications.
+        // During bootstrap those no-op writes can overflow the watcher queue
+        // and repeatedly trigger full scans of an otherwise unchanged tree.
+        if matches!(remote.kind, Kind::File | Kind::Directory)
+            && old.as_ref().is_some_and(|e| e.mode != remote.mode)
+        {
             root.dir.set_permissions(
                 &remote.path,
                 cap_std::fs::Permissions::from_std(std::fs::Permissions::from_mode(remote.mode)),
@@ -980,6 +986,54 @@ mod tests {
             Kind::Deleted
         );
     }
+    #[test]
+    fn identical_peer_entries_merge_clocks_without_filesystem_writes() {
+        let (state, files, root, id) = fixture();
+        std::fs::create_dir(files.path().join("dir")).unwrap();
+        std::fs::write(files.path().join("dir/file"), b"identical content").unwrap();
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        let c = store::open(state.path()).unwrap();
+        for path in ["dir", "dir/file"] {
+            let local = store::get(&c, "test", path).unwrap().unwrap();
+            let before = stamp(&root.dir.symlink_metadata(path).unwrap());
+            let mut remote = local.clone();
+            remote.clock = BTreeMap::from([("a".repeat(64), 1)]);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            assert!(!apply(&c, &root, &id, &remote, None).unwrap());
+            assert_eq!(stamp(&root.dir.symlink_metadata(path).unwrap()), before);
+            let merged = store::get(&c, "test", path).unwrap().unwrap();
+            assert_eq!(merged.clock, model::merge(&local.clock, &remote.clock));
+            let mut c = store::open(state.path()).unwrap();
+            scan_batch(&mut c, &root, &[path.into()], &id, 0, false).unwrap();
+            assert_eq!(
+                store::get(&c, "test", path).unwrap().unwrap().seq,
+                merged.seq
+            );
+        }
+    }
+
+    #[test]
+    fn permission_changes_still_apply_when_bytes_match() {
+        let (state, files, root, id) = fixture();
+        std::fs::write(files.path().join("file"), b"same bytes").unwrap();
+        std::fs::set_permissions(
+            files.path().join("file"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        let c = store::open(state.path()).unwrap();
+        let mut remote = store::get(&c, "test", "file").unwrap().unwrap();
+        remote.clock.insert("a".repeat(64), 1);
+        remote.mode = 0o755;
+        assert!(!apply(&c, &root, &id, &remote, None).unwrap());
+        assert_eq!(root.dir.metadata("file").unwrap().mode() & 0o777, 0o755);
+        assert_eq!(
+            std::fs::read(files.path().join("file")).unwrap(),
+            b"same bytes"
+        );
+    }
+
     #[test]
     fn marker_loss_never_becomes_mass_delete() {
         let (state, files, root, id) = fixture();
