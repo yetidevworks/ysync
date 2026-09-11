@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "basis_and_plan_json_bytes": 86604,
+      "cdc_literal_bytes": 134250,
+      "change": "4 KiB overwrite",
+      "file_bytes": 33554432,
+      "fixed_64KiB_literal_bytes": 65536,
+      "index_and_plan_seconds": 0.145477459,
+      "reused_percent": 99.59990382194519
+    },
+    {
+      "basis_and_plan_json_bytes": 86723,
+      "cdc_literal_bytes": 21645,
+      "change": "19 byte insertion",
+      "file_bytes": 33554451,
+      "fixed_64KiB_literal_bytes": 33554451,
+      "index_and_plan_seconds": 0.144623708,
+      "reused_percent": 99.93549290971859
+    },
+    {
+      "basis_and_plan_json_bytes": 86717,
+      "cdc_literal_bytes": 213589,
+      "change": "4096 byte deletion",
+      "file_bytes": 33550336,
+      "fixed_64KiB_literal_bytes": 25554944,
+      "index_and_plan_seconds": 0.145352583,
+      "reused_percent": 99.3633774636415
+    }
+  ],
+  "scope": "Synthetic in-memory algorithm comparison; not network throughput. Includes scanning both versions and planning; excludes receiver writes, encryption, and fsync."
+}

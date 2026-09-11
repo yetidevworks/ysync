@@ -1,0 +1,46 @@
+[package]
+name = "ysync"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+repository = "https://github.com/yetidevworks/ysync"
+readme = "README.md"
+description = "Direct, encrypted file synchronization for macOS and Linux"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+blake3 = "1"
+cap-std = "4"
+clap = { version = "4", features = ["derive"] }
+ctrlc = { version = "3", features = ["termination"] }
+dirs = "6"
+fs2 = "0.4"
+globset = "0.4"
+hex = "0.4"
+notify = "8"
+rayon = "1"
+rusqlite = { version = "0.38", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+snow = "0.10"
+unicode-normalization = "0.1"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[[bench]]
+name = "scanner"
+path = "benchmarks/scanner.rs"
+harness = false
+
+[[bench]]
+name = "delta"
+path = "benchmarks/delta.rs"
+harness = false

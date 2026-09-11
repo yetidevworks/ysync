@@ -1,0 +1,777 @@
+{
+  "scope": "Live-folder scanner/watcher evaluation. No peers or transfers. All daemons stopped after each trial.",
+  "measured_binary_sha256": {
+    "macos": "58ec903d7657a187e430cecb4bd47105ca0358e684d80d9ef5c4c24cc849d0af",
+    "linux": "860d69e5a6f91417c5a3d4b99f7174ad823ae861a5a3510bb49ff3dbcfef300f"
+  },
+  "caveats": [
+    "Measurements precede quota-retry and incomplete-scan-status fixes.",
+    "Mac Projects initial full scan reported a deep-path error, then scoped successes masked its health warning in the measured build. Full-tree success cannot be inferred from watching phase.",
+    "Mac initial scanning overlapped ordinary work, including a brief CPU profile and small local build. No controlled Syncthing comparison.",
+    "Linux warm trials reused an index populated during aborted initial runs. Do not compare their times with Mac first indexing.",
+    "A completed benchmark means its probes finished, not that the root is fully synchronized or error free."
+  ],
+  "macos_final_index_file_totals": {
+    "projects": {
+      "files": 1575610,
+      "bytes": 103900177602
+    },
+    "workspace": {
+      "files": 1826161,
+      "bytes": 48069769751
+    }
+  },
+  "macos": {
+    "state": "/Users/rhuk/.cache/ysync-live-eval-20260910",
+    "roots": {
+      "projects": "/Users/rhuk/Projects",
+      "workspace": "/Users/rhuk/workspace"
+    },
+    "workers": 2,
+    "initial": {
+      "projects": {
+        "wall_seconds": 1114.708,
+        "phase": "watching",
+        "scanned": 801,
+        "files": 0,
+        "bytes": 0,
+        "last_scan": 1789101451,
+        "error": null,
+        "watcher": "native",
+        "full_scans": 1,
+        "scoped_scans": 1,
+        "checked_entries": 801,
+        "hashed_files": 1575632,
+        "hashed_bytes": 103905408586,
+        "watch_events": 4376,
+        "coalesced_events": 3673,
+        "ignored_events": 6,
+        "watch_overflows": 0,
+        "queued_paths": 0,
+        "native_watches": 1
+      },
+      "workspace": {
+        "wall_seconds": 1282.176,
+        "phase": "watching",
+        "scanned": 4,
+        "files": 1826141,
+        "bytes": 48069656682,
+        "last_scan": 1789101619,
+        "error": null,
+        "watcher": "native",
+        "full_scans": 1,
+        "scoped_scans": 4,
+        "checked_entries": 2249061,
+        "hashed_files": 1826210,
+        "hashed_bytes": 48130887938,
+        "watch_events": 5256,
+        "coalesced_events": 4693,
+        "ignored_events": 0,
+        "watch_overflows": 0,
+        "queued_paths": 3,
+        "native_watches": 1
+      }
+    },
+    "probes": {
+      "projects": {
+        "create_seconds": 0.223,
+        "create_work": {
+          "checked_entries": 1,
+          "hashed_files": 1,
+          "hashed_bytes": 1048576,
+          "full_scans": 0,
+          "scoped_scans": 1,
+          "watch_events": 3,
+          "coalesced_events": 2,
+          "watch_overflows": 0
+        },
+        "burst_writes": 200,
+        "burst_seconds": 0.235,
+        "burst_work": {
+          "checked_entries": 1,
+          "hashed_files": 1,
+          "hashed_bytes": 1048576,
+          "full_scans": 0,
+          "scoped_scans": 1,
+          "watch_events": 2,
+          "coalesced_events": 1,
+          "watch_overflows": 0
+        },
+        "delete_seconds": 0.214,
+        "delete_work": {
+          "checked_entries": 1,
+          "hashed_files": 0,
+          "hashed_bytes": 0,
+          "full_scans": 0,
+          "scoped_scans": 1,
+          "watch_events": 2,
+          "coalesced_events": 1,
+          "watch_overflows": 0
+        }
+      },
+      "workspace": {
+        "create_seconds": 0.222,
+        "create_work": {
+          "checked_entries": 3,
+          "hashed_files": 3,
+          "hashed_bytes": 45451565,
+          "full_scans": 0,
+          "scoped_scans": 2,
+          "watch_events": 5,
+          "coalesced_events": 2,
+          "watch_overflows": 0
+        },
+        "burst_writes": 200,
+        "burst_seconds": 0.233,
+        "burst_work": {
+          "checked_entries": 1,
+          "hashed_files": 1,
+          "hashed_bytes": 1048576,
+          "full_scans": 0,
+          "scoped_scans": 1,
+          "watch_events": 6,
+          "coalesced_events": 5,
+          "watch_overflows": 0
+        },
+        "delete_seconds": 0.12,
+        "delete_work": {
+          "checked_entries": 1,
+          "hashed_files": 0,
+          "hashed_bytes": 0,
+          "full_scans": 0,
+          "scoped_scans": 1,
+          "watch_events": 4,
+          "coalesced_events": 3,
+          "watch_overflows": 0
+        }
+      }
+    },
+    "cpu_temperature_peak_c": null,
+    "scope": "Unpaired daemons on live trees; existing files only read. Temporary probes created and removed. Concurrent unrelated filesystem activity may affect counters. No peer transfers.",
+    "initial_cpu_seconds": 2261.79,
+    "idle": {
+      "wall_seconds": 15.083,
+      "cpu_seconds": 0.11999999999989086,
+      "cpu_percent_of_one_core": 0.796,
+      "folders": {
+        "projects": {
+          "checked_entries": 0,
+          "hashed_files": 0,
+          "hashed_bytes": 0,
+          "full_scans": 0,
+          "scoped_scans": 0,
+          "watch_events": 0,
+          "coalesced_events": 0,
+          "watch_overflows": 0
+        },
+        "workspace": {
+          "checked_entries": 4,
+          "hashed_files": 4,
+          "hashed_bytes": 88805465,
+          "full_scans": 0,
+          "scoped_scans": 2,
+          "watch_events": 4,
+          "coalesced_events": 0,
+          "watch_overflows": 0
+        }
+      }
+    },
+    "final_status": {
+      "pid": 62394,
+      "started": 1789100337,
+      "updated": 1789101647,
+      "device": "aca0fa9e6ab89fb3bddf5ba97d87a4a37a67b67a60c5cf15f6f57f92779f26bd",
+      "listen": "127.0.0.1:0",
+      "sent_bytes": 0,
+      "received_bytes": 0,
+      "resumed_bytes": 0,
+      "delta_reused_bytes": 0,
+      "sent_entries": 0,
+      "received_entries": 0,
+      "send_bytes_per_sec": 0.0,
+      "receive_bytes_per_sec": 0.0,
+      "conflicts": 0,
+      "folders": {
+        "projects": {
+          "phase": "watching",
+          "scanned": 1,
+          "files": 0,
+          "bytes": 0,
+          "last_scan": 1789101641,
+          "error": null,
+          "watcher": "native",
+          "full_scans": 1,
+          "scoped_scans": 18,
+          "checked_entries": 850,
+          "hashed_files": 1575666,
+          "hashed_bytes": 103938006985,
+          "watch_events": 4510,
+          "coalesced_events": 3751,
+          "ignored_events": 12,
+          "watch_overflows": 0,
+          "queued_paths": 0,
+          "native_watches": 1
+        },
+        "workspace": {
+          "phase": "watching",
+          "scanned": 1,
+          "files": 1826141,
+          "bytes": 48069656682,
+          "last_scan": 1789101647,
+          "error": null,
+          "watcher": "native",
+          "full_scans": 1,
+          "scoped_scans": 13,
+          "checked_entries": 2249099,
+          "hashed_files": 1826239,
+          "hashed_bytes": 48286666151,
+          "watch_events": 5352,
+          "coalesced_events": 4754,
+          "ignored_events": 0,
+          "watch_overflows": 0,
+          "queued_paths": 0,
+          "native_watches": 1
+        }
+      },
+      "connected_peers": [],
+      "events": [
+        {
+          "at": 1789101451,
+          "kind": "error",
+          "folder": "projects",
+          "detail": "scan incomplete; accessible files were indexed, deletion inference suspended: qubwa/qubwa-dev.old/skeleton/user/plugins/color-tools/grav-plugin-color-tools/grav-plugin-color-tools/grav-plugin-color-tools/grav-plugin-color-tools/grav-plugin-color-tools/grav-plugin-color-tools/grav-plugin-color-tools/grav-plugin-color-tools/grav-plugin-color-tools/grav-plugin-color-tools/grav-plugin-color-tools/grav-plugin-color-tools/grav-plugin-color-tools/grav-plugin-color-tools/grav-plugin-color-tools/grav-plu"
+        }
+      ]
+    },
+    "completed": true,
+    "total_seconds": 1311.547
+  },
+  "linux_uncapped_results": {
+    "state": "/home/rhuk/.cache/ysync-live-eval-20260910",
+    "roots": {
+      "projects": "/home/rhuk/Projects",
+      "workspace": "/home/rhuk/workspace"
+    },
+    "workers": 2,
+    "initial": {},
+    "probes": {},
+    "cpu_temperature_peak_c": 85.25,
+    "scope": "Unpaired daemons on live trees; existing files only read. Temporary probes created and removed. Concurrent unrelated filesystem activity may affect counters. No peer transfers.",
+    "error": "evaluation stopped at CPU temperature 85.25 C",
+    "final_status": {
+      "pid": 70461,
+      "started": 1789100344,
+      "updated": 1789100719,
+      "device": "e938b607a885c9c48c61a9b998fe700b1eb83f19d59fad5404d9b2de25ab9901",
+      "listen": "127.0.0.1:0",
+      "sent_bytes": 0,
+      "received_bytes": 0,
+      "resumed_bytes": 0,
+      "delta_reused_bytes": 0,
+      "sent_entries": 0,
+      "received_entries": 0,
+      "send_bytes_per_sec": 0.0,
+      "receive_bytes_per_sec": 0.0,
+      "conflicts": 0,
+      "folders": {
+        "projects": {
+          "phase": "scanning",
+          "scanned": 1667456,
+          "files": 0,
+          "bytes": 0,
+          "last_scan": null,
+          "error": null,
+          "watcher": "native",
+          "full_scans": 1,
+          "scoped_scans": 0,
+          "checked_entries": 0,
+          "hashed_files": 0,
+          "hashed_bytes": 0,
+          "watch_events": 0,
+          "coalesced_events": 0,
+          "ignored_events": 0,
+          "watch_overflows": 0,
+          "queued_paths": 0,
+          "native_watches": 2
+        },
+        "workspace": {
+          "phase": "scanning",
+          "scanned": 1941504,
+          "files": 0,
+          "bytes": 0,
+          "last_scan": null,
+          "error": null,
+          "watcher": "native",
+          "full_scans": 1,
+          "scoped_scans": 0,
+          "checked_entries": 0,
+          "hashed_files": 0,
+          "hashed_bytes": 0,
+          "watch_events": 0,
+          "coalesced_events": 0,
+          "ignored_events": 0,
+          "watch_overflows": 0,
+          "queued_paths": 0,
+          "native_watches": 2
+        }
+      },
+      "connected_peers": [],
+      "events": []
+    },
+    "total_seconds": 376.207
+  },
+  "linux_capped_two_folders_results": {
+    "state": "/home/rhuk/.cache/ysync-live-eval-20260910",
+    "roots": {
+      "projects": "/home/rhuk/Projects",
+      "workspace": "/home/rhuk/workspace"
+    },
+    "workers": 2,
+    "resumed_index": true,
+    "cpu_quota_percent": 50,
+    "initial": {
+      "projects": {
+        "wall_seconds": 422.421,
+        "phase": "polling",
+        "scanned": 1802821,
+        "files": 1566453,
+        "bytes": 103056951065,
+        "last_scan": 1789101280,
+        "error": null,
+        "watcher": "polling fallback",
+        "full_scans": 1,
+        "scoped_scans": 0,
+        "checked_entries": 1802821,
+        "hashed_files": 101936,
+        "hashed_bytes": 7297187482,
+        "watch_events": 902456,
+        "coalesced_events": 0,
+        "ignored_events": 902456,
+        "watch_overflows": 0,
+        "queued_paths": 0,
+        "native_watches": 0
+      },
+      "workspace": {
+        "wall_seconds": 533.739,
+        "phase": "watching",
+        "scanned": 2247133,
+        "files": 1825395,
+        "bytes": 48009871220,
+        "last_scan": 1789101392,
+        "error": null,
+        "watcher": "native",
+        "full_scans": 1,
+        "scoped_scans": 0,
+        "checked_entries": 2247133,
+        "hashed_files": 227741,
+        "hashed_bytes": 4815706744,
+        "watch_events": 1933648,
+        "coalesced_events": 0,
+        "ignored_events": 1933648,
+        "watch_overflows": 0,
+        "queued_paths": 0,
+        "native_watches": 418248
+      }
+    },
+    "probes": {},
+    "cpu_temperature_peak_c": 78.25,
+    "scope": "Unpaired daemons on live trees; existing files only read. Temporary probes created and removed. Concurrent unrelated filesystem activity may affect counters. No peer transfers.",
+    "initial_cpu_seconds": 264.68,
+    "idle": {
+      "wall_seconds": 15.033,
+      "cpu_seconds": 7.369999999999948,
+      "cpu_percent_of_one_core": 49.024,
+      "folders": {
+        "projects": {
+          "checked_entries": 0,
+          "hashed_files": 0,
+          "hashed_bytes": 0,
+          "full_scans": 0,
+          "scoped_scans": 0,
+          "watch_events": 0,
+          "coalesced_events": 0,
+          "watch_overflows": 0
+        },
+        "workspace": {
+          "checked_entries": 0,
+          "hashed_files": 0,
+          "hashed_bytes": 0,
+          "full_scans": 0,
+          "scoped_scans": 0,
+          "watch_events": 0,
+          "coalesced_events": 0,
+          "watch_overflows": 0
+        }
+      }
+    },
+    "error": "daemon exited: 0",
+    "final_status": {
+      "pid": 0,
+      "started": 1789100858,
+      "updated": 1789101430,
+      "device": "e938b607a885c9c48c61a9b998fe700b1eb83f19d59fad5404d9b2de25ab9901",
+      "listen": "127.0.0.1:0",
+      "sent_bytes": 0,
+      "received_bytes": 0,
+      "resumed_bytes": 0,
+      "delta_reused_bytes": 0,
+      "sent_entries": 0,
+      "received_entries": 0,
+      "send_bytes_per_sec": 0.0,
+      "receive_bytes_per_sec": 0.0,
+      "conflicts": 0,
+      "folders": {
+        "projects": {
+          "phase": "scanning",
+          "scanned": 648960,
+          "files": 1566453,
+          "bytes": 103056951065,
+          "last_scan": 1789101280,
+          "error": null,
+          "watcher": "native",
+          "full_scans": 2,
+          "scoped_scans": 0,
+          "checked_entries": 1802821,
+          "hashed_files": 101936,
+          "hashed_bytes": 7297187482,
+          "watch_events": 902456,
+          "coalesced_events": 0,
+          "ignored_events": 902456,
+          "watch_overflows": 0,
+          "queued_paths": 0,
+          "native_watches": 2
+        },
+        "workspace": {
+          "phase": "watching",
+          "scanned": 2247133,
+          "files": 1825395,
+          "bytes": 48009871220,
+          "last_scan": 1789101392,
+          "error": null,
+          "watcher": "native",
+          "full_scans": 1,
+          "scoped_scans": 0,
+          "checked_entries": 2247133,
+          "hashed_files": 227741,
+          "hashed_bytes": 4815706744,
+          "watch_events": 1933648,
+          "coalesced_events": 0,
+          "ignored_events": 1933648,
+          "watch_overflows": 0,
+          "queued_paths": 0,
+          "native_watches": 418248
+        }
+      },
+      "connected_peers": [],
+      "events": [
+        {
+          "at": 1789101274,
+          "kind": "error",
+          "folder": "projects",
+          "detail": "native watch registration failed; retry in 30s: OS file watch limit reached. about [\"/home/rhuk/Projects/svn/joomla/website/.svn\"]"
+        },
+        {
+          "at": 1789101430,
+          "kind": "service",
+          "folder": null,
+          "detail": "Daemon stopped"
+        }
+      ]
+    },
+    "total_seconds": 572.134
+  },
+  "linux_watch_limit_status": {
+    "pid": 72912,
+    "started": 1789100858,
+    "updated": 1789101429,
+    "device": "e938b607a885c9c48c61a9b998fe700b1eb83f19d59fad5404d9b2de25ab9901",
+    "listen": "127.0.0.1:0",
+    "sent_bytes": 0,
+    "received_bytes": 0,
+    "resumed_bytes": 0,
+    "delta_reused_bytes": 0,
+    "sent_entries": 0,
+    "received_entries": 0,
+    "send_bytes_per_sec": 0.0,
+    "receive_bytes_per_sec": 0.0,
+    "conflicts": 0,
+    "folders": {
+      "projects": {
+        "phase": "scanning",
+        "scanned": 643456,
+        "files": 1566453,
+        "bytes": 103056951065,
+        "last_scan": 1789101280,
+        "error": null,
+        "watcher": "native",
+        "full_scans": 2,
+        "scoped_scans": 0,
+        "checked_entries": 1802821,
+        "hashed_files": 101936,
+        "hashed_bytes": 7297187482,
+        "watch_events": 902456,
+        "coalesced_events": 0,
+        "ignored_events": 902456,
+        "watch_overflows": 0,
+        "queued_paths": 0,
+        "native_watches": 2
+      },
+      "workspace": {
+        "phase": "watching",
+        "scanned": 2247133,
+        "files": 1825395,
+        "bytes": 48009871220,
+        "last_scan": 1789101392,
+        "error": null,
+        "watcher": "native",
+        "full_scans": 1,
+        "scoped_scans": 0,
+        "checked_entries": 2247133,
+        "hashed_files": 227741,
+        "hashed_bytes": 4815706744,
+        "watch_events": 1933648,
+        "coalesced_events": 0,
+        "ignored_events": 1933648,
+        "watch_overflows": 0,
+        "queued_paths": 0,
+        "native_watches": 418248
+      }
+    },
+    "connected_peers": [],
+    "events": [
+      {
+        "at": 1789101274,
+        "kind": "error",
+        "folder": "projects",
+        "detail": "native watch registration failed; retry in 30s: OS file watch limit reached. about [\"/home/rhuk/Projects/svn/joomla/website/.svn\"]"
+      }
+    ]
+  },
+  "linux_workspace_results": {
+    "state": "/home/rhuk/.cache/ysync-live-eval-20260910",
+    "roots": {
+      "workspace": "/home/rhuk/workspace"
+    },
+    "workers": 2,
+    "resumed_index": true,
+    "cpu_quota_percent": 50,
+    "initial": {
+      "workspace": {
+        "wall_seconds": 241.875,
+        "phase": "watching",
+        "scanned": 2247133,
+        "files": 1825395,
+        "bytes": 48009871220,
+        "last_scan": 1789101710,
+        "error": null,
+        "watcher": "native",
+        "full_scans": 1,
+        "scoped_scans": 0,
+        "checked_entries": 2247133,
+        "hashed_files": 0,
+        "hashed_bytes": 0,
+        "watch_events": 1706625,
+        "coalesced_events": 0,
+        "ignored_events": 1706625,
+        "watch_overflows": 0,
+        "queued_paths": 0,
+        "native_watches": 418248
+      }
+    },
+    "probes": {
+      "workspace": {
+        "create_seconds": 0.203,
+        "create_work": {
+          "checked_entries": 1,
+          "hashed_files": 1,
+          "hashed_bytes": 1048576,
+          "full_scans": 0,
+          "scoped_scans": 1,
+          "watch_events": 8,
+          "coalesced_events": 2,
+          "watch_overflows": 0
+        },
+        "burst_writes": 200,
+        "burst_seconds": 0.204,
+        "burst_work": {
+          "checked_entries": 1,
+          "hashed_files": 1,
+          "hashed_bytes": 1048576,
+          "full_scans": 0,
+          "scoped_scans": 1,
+          "watch_events": 603,
+          "coalesced_events": 399,
+          "watch_overflows": 0
+        },
+        "delete_seconds": 0.202,
+        "delete_work": {
+          "checked_entries": 1,
+          "hashed_files": 0,
+          "hashed_bytes": 0,
+          "full_scans": 0,
+          "scoped_scans": 1,
+          "watch_events": 7,
+          "coalesced_events": 0,
+          "watch_overflows": 0
+        }
+      }
+    },
+    "cpu_temperature_peak_c": 80.75,
+    "scope": "Unpaired daemons on live trees; existing files only read. Temporary probes created and removed. Concurrent unrelated filesystem activity may affect counters. No peer transfers.",
+    "initial_cpu_seconds": 118.9,
+    "idle": {
+      "wall_seconds": 15.044,
+      "cpu_seconds": 0.030000000000001137,
+      "cpu_percent_of_one_core": 0.199,
+      "folders": {
+        "workspace": {
+          "checked_entries": 0,
+          "hashed_files": 0,
+          "hashed_bytes": 0,
+          "full_scans": 0,
+          "scoped_scans": 0,
+          "watch_events": 0,
+          "coalesced_events": 0,
+          "watch_overflows": 0
+        }
+      }
+    },
+    "final_status": {
+      "pid": 75650,
+      "started": 1789101469,
+      "updated": 1789101734,
+      "device": "e938b607a885c9c48c61a9b998fe700b1eb83f19d59fad5404d9b2de25ab9901",
+      "listen": "127.0.0.1:0",
+      "sent_bytes": 0,
+      "received_bytes": 0,
+      "resumed_bytes": 0,
+      "delta_reused_bytes": 0,
+      "sent_entries": 0,
+      "received_entries": 0,
+      "send_bytes_per_sec": 0.0,
+      "receive_bytes_per_sec": 0.0,
+      "conflicts": 0,
+      "folders": {
+        "projects": {
+          "phase": "paused",
+          "scanned": 0,
+          "files": 0,
+          "bytes": 0,
+          "last_scan": null,
+          "error": null,
+          "watcher": "paused",
+          "full_scans": 0,
+          "scoped_scans": 0,
+          "checked_entries": 0,
+          "hashed_files": 0,
+          "hashed_bytes": 0,
+          "watch_events": 0,
+          "coalesced_events": 0,
+          "ignored_events": 0,
+          "watch_overflows": 0,
+          "queued_paths": 0,
+          "native_watches": 0
+        },
+        "workspace": {
+          "phase": "watching",
+          "scanned": 1,
+          "files": 1825395,
+          "bytes": 48009871220,
+          "last_scan": 1789101733,
+          "error": null,
+          "watcher": "native",
+          "full_scans": 1,
+          "scoped_scans": 3,
+          "checked_entries": 2247136,
+          "hashed_files": 2,
+          "hashed_bytes": 2097152,
+          "watch_events": 1707243,
+          "coalesced_events": 401,
+          "ignored_events": 1706839,
+          "watch_overflows": 0,
+          "queued_paths": 0,
+          "native_watches": 418248
+        }
+      },
+      "connected_peers": [],
+      "events": []
+    },
+    "completed": true,
+    "total_seconds": 265.617
+  },
+  "linux_projects_aborted_results": {
+    "state": "/home/rhuk/.cache/ysync-live-eval-20260910",
+    "roots": {
+      "projects": "/home/rhuk/Projects"
+    },
+    "workers": 2,
+    "resumed_index": true,
+    "cpu_quota_percent": 50,
+    "initial": {},
+    "probes": {},
+    "cpu_temperature_peak_c": 85.25,
+    "scope": "Unpaired daemons on live trees; existing files only read. Temporary probes created and removed. Concurrent unrelated filesystem activity may affect counters. No peer transfers.",
+    "error": "evaluation stopped at CPU temperature 85.25 C",
+    "final_status": {
+      "pid": 77161,
+      "started": 1789101783,
+      "updated": 1789101877,
+      "device": "e938b607a885c9c48c61a9b998fe700b1eb83f19d59fad5404d9b2de25ab9901",
+      "listen": "127.0.0.1:0",
+      "sent_bytes": 0,
+      "received_bytes": 0,
+      "resumed_bytes": 0,
+      "delta_reused_bytes": 0,
+      "sent_entries": 0,
+      "received_entries": 0,
+      "send_bytes_per_sec": 0.0,
+      "receive_bytes_per_sec": 0.0,
+      "conflicts": 0,
+      "folders": {
+        "projects": {
+          "phase": "scanning",
+          "scanned": 867328,
+          "files": 0,
+          "bytes": 0,
+          "last_scan": null,
+          "error": null,
+          "watcher": "native",
+          "full_scans": 1,
+          "scoped_scans": 0,
+          "checked_entries": 0,
+          "hashed_files": 0,
+          "hashed_bytes": 0,
+          "watch_events": 0,
+          "coalesced_events": 0,
+          "ignored_events": 0,
+          "watch_overflows": 0,
+          "queued_paths": 0,
+          "native_watches": 2
+        },
+        "workspace": {
+          "phase": "paused",
+          "scanned": 0,
+          "files": 0,
+          "bytes": 0,
+          "last_scan": null,
+          "error": null,
+          "watcher": "paused",
+          "full_scans": 0,
+          "scoped_scans": 0,
+          "checked_entries": 0,
+          "hashed_files": 0,
+          "hashed_bytes": 0,
+          "watch_events": 0,
+          "coalesced_events": 0,
+          "ignored_events": 0,
+          "watch_overflows": 0,
+          "queued_paths": 0,
+          "native_watches": 0
+        }
+      },
+      "connected_peers": [],
+      "events": []
+    },
+    "total_seconds": 95.642
+  }
+}

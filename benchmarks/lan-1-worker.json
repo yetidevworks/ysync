@@ -1,0 +1,12 @@
+{
+  "files": 5000,
+  "bytes": 20480000,
+  "scan_workers": 1,
+  "bootstrap_seconds": 7.1,
+  "files_per_second": 704.2,
+  "payload_MB_per_second": 2.88,
+  "reverse_edit_latency_ms": 2999.8,
+  "verified_all_payloads": true,
+  "environment": "Mac to home-omarchy; remote ~/.cache disk-backed roots; existing workloads left running",
+  "remote_reconciliation_secs": 5
+}

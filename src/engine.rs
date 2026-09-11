@@ -1,0 +1,1127 @@
+use crate::{
+    config::Folder,
+    model::{self, Entry, Kind, Relation},
+    store,
+};
+use anyhow::{Context, Result, bail};
+use cap_std::fs::{Dir, Metadata, MetadataExt, OpenOptions};
+use globset::{Glob, GlobSet, GlobSetBuilder};
+use rayon::prelude::*;
+use rusqlite::Connection;
+use std::os::unix::fs::PermissionsExt;
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+pub struct Root {
+    pub folder: Folder,
+    pub dir: Dir,
+    pub gate: Arc<Mutex<()>>,
+    ignores: GlobSet,
+    pub hashed_files: AtomicU64,
+    pub hashed_bytes: AtomicU64,
+    pub scan_control: Option<Arc<crate::scanning::ScanControl>>,
+}
+impl Root {
+    pub fn open(folder: Folder, gate: Arc<Mutex<()>>) -> Result<Self> {
+        let dir = Dir::open_ambient_dir(&folder.path, cap_std::ambient_authority())?;
+        if dir.read_to_string(".ysync/marker")?.trim() != folder.marker {
+            bail!("folder marker mismatch: {}", folder.id);
+        }
+        let mut builder = GlobSetBuilder::new();
+        let mut patterns = folder.ignores.clone();
+        if let Ok(s) = dir.read_to_string(".ysyncignore") {
+            patterns.extend(
+                s.lines()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty() && !s.starts_with('#'))
+                    .map(str::to_owned),
+            );
+        }
+        for p in patterns {
+            builder.add(Glob::new(&p)?);
+            if !p.contains('/') {
+                builder.add(Glob::new(&format!("**/{p}"))?);
+            }
+        }
+        Ok(Self {
+            folder,
+            dir,
+            gate,
+            ignores: builder.build()?,
+            hashed_files: AtomicU64::new(0),
+            hashed_bytes: AtomicU64::new(0),
+            scan_control: None,
+        })
+    }
+    fn scan_checkpoint(&self) -> Result<()> {
+        if let Some(control) = &self.scan_control {
+            control.checkpoint()?;
+        }
+        Ok(())
+    }
+    pub fn excluded(&self, path: &str) -> bool {
+        let mut prefix = String::new();
+        for c in path.split('/') {
+            if c.eq_ignore_ascii_case(".ysync") || c.eq_ignore_ascii_case(".ysyncignore") {
+                return true;
+            }
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(c);
+            if self.ignores.is_match(&prefix) {
+                return true;
+            }
+        }
+        false
+    }
+    pub fn check(&self) -> Result<()> {
+        // Check both the live mount path and our directory handle before inferring deletions.
+        let actual = std::fs::read_to_string(self.folder.path.join(".ysync/marker"))?;
+        if actual.trim() != self.folder.marker
+            || self.dir.read_to_string(".ysync/marker")?.trim() != self.folder.marker
+        {
+            bail!("folder unavailable or replaced");
+        }
+        Ok(())
+    }
+    pub fn parents(&self, path: &str, create: bool) -> Result<()> {
+        self.parent_dir(path, create).map(|_| ())
+    }
+    fn parent_dir(&self, path: &str, create: bool) -> Result<Option<Dir>> {
+        model::validate_path(path)?;
+        let mut p = PathBuf::new();
+        let mut opened: Option<Dir> = None;
+        let components: Vec<_> = Path::new(path).components().collect();
+        for part in &components[..components.len() - 1] {
+            p.push(part);
+            let current = opened.as_ref().unwrap_or(&self.dir);
+            let meta = match current.symlink_metadata(part) {
+                Ok(m) => m,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && create => {
+                    current.create_dir(part)?;
+                    current.symlink_metadata(part)?
+                }
+                Err(e) => return Err(e.into()),
+            };
+            if !meta.is_dir() || meta.is_symlink() {
+                bail!("path parent is not a real directory: {}", p.display());
+            }
+            let next = current.open_dir(part)?;
+            let actual = next.dir_metadata()?;
+            if (meta.dev(), meta.ino()) != (actual.dev(), actual.ino()) {
+                bail!("path parent changed while opening: {}", p.display());
+            }
+            opened = Some(next);
+        }
+        Ok(opened)
+    }
+}
+pub fn stamp(m: &Metadata) -> String {
+    format!(
+        "{}:{}:{}:{}:{}:{}:{}",
+        m.dev(),
+        m.ino(),
+        m.len(),
+        m.mtime(),
+        m.mtime_nsec(),
+        m.ctime(),
+        m.ctime_nsec()
+    )
+}
+fn hash_reader(reader: &mut impl Read, root: &Root) -> Result<(String, u64)> {
+    let mut h = blake3::Hasher::new();
+    let mut bytes = 0;
+    let mut buf = [0u8; 262144];
+    loop {
+        root.scan_checkpoint()?;
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+        bytes += n as u64;
+    }
+    Ok((h.finalize().to_hex().to_string(), bytes))
+}
+pub fn observe(root: &Root, path: &str, old: Option<&Entry>, force: bool) -> Result<Option<Entry>> {
+    root.scan_checkpoint()?;
+    model::validate_path(path)?;
+    let parent_handle = match root.parent_dir(path, false) {
+        Ok(dir) => dir,
+        Err(e)
+            if e.downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    };
+    let parent = parent_handle.as_ref().unwrap_or(&root.dir);
+    let name = Path::new(path).file_name().context("missing filename")?;
+    let meta = match parent.symlink_metadata(name) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let st = stamp(&meta);
+    let mode = meta.mode() & 0o777;
+    if !force && old.is_some_and(|e| e.kind != Kind::Deleted && e.stamp == st && e.mode == mode) {
+        return Ok(old.cloned());
+    }
+    let (kind, size, hash, target) = if meta.is_symlink() {
+        let t = parent
+            .read_link_contents(name)?
+            .into_os_string()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("non-UTF-8 link target"))?;
+        (
+            Kind::Symlink,
+            0,
+            blake3::hash(t.as_bytes()).to_hex().to_string(),
+            Some(t),
+        )
+    } else if meta.is_dir() {
+        (Kind::Directory, 0, String::new(), None)
+    } else if meta.is_file() {
+        let mut f = parent.open(name)?;
+        let before = stamp(&f.metadata()?);
+        if before != st {
+            bail!("file changed before hashing: {path}");
+        }
+        let (hash, bytes) = hash_reader(&mut f, root)?;
+        root.hashed_files.fetch_add(1, Ordering::Relaxed);
+        root.hashed_bytes.fetch_add(bytes, Ordering::Relaxed);
+        if stamp(&f.metadata()?) != before || stamp(&root.dir.symlink_metadata(path)?) != before {
+            bail!("file changed during hashing: {path}");
+        }
+        (Kind::File, meta.len(), hash, None)
+    } else {
+        bail!("unsupported special file: {path}");
+    };
+    Ok(Some(Entry {
+        path: path.into(),
+        kind,
+        size,
+        hash,
+        target,
+        mode,
+        clock: old.map(|e| e.clock.clone()).unwrap_or_default(),
+        seq: 0,
+        stamp: st,
+    }))
+}
+fn refresh(
+    c: &Connection,
+    root: &Root,
+    path: &str,
+    device: &str,
+    seen: i64,
+    force: bool,
+) -> Result<()> {
+    if root.excluded(path) {
+        return Ok(());
+    }
+    let old = store::get(c, &root.folder.id, path)?;
+    let observed = observe(root, path, old.as_ref(), force)?;
+    record_observation(c, root, path, old, observed, device, seen)
+}
+fn record_observation(
+    c: &Connection,
+    root: &Root,
+    path: &str,
+    old: Option<Entry>,
+    observed: Option<Entry>,
+    device: &str,
+    seen: i64,
+) -> Result<()> {
+    let mut fresh = match observed {
+        Some(e) => e,
+        None => match old.as_ref() {
+            Some(e) if e.kind != Kind::Deleted => {
+                let mut x = e.clone();
+                x.kind = Kind::Deleted;
+                x.hash.clear();
+                x.size = 0;
+                x.target = None;
+                x.stamp.clear();
+                x
+            }
+            _ => return Ok(()),
+        },
+    };
+    if old.as_ref().is_some_and(|e| e.same_content(&fresh)) {
+        store::mark_seen(c, &root.folder.id, path, &fresh.stamp, seen)?;
+    } else {
+        *fresh.clock.entry(device.into()).or_default() += 1;
+        store::put(c, &root.folder.id, &mut fresh, seen)?;
+    }
+    Ok(())
+}
+fn scan_batch(
+    c: &mut Connection,
+    root: &Root,
+    paths: &[String],
+    device: &str,
+    seen: i64,
+    force: bool,
+) -> Result<Vec<String>> {
+    let inputs = paths
+        .iter()
+        .filter(|p| !root.excluded(p))
+        .map(|p| Ok((p.clone(), store::get(c, &root.folder.id, p)?)))
+        .collect::<Result<Vec<_>>>()?;
+    // Hash in parallel outside the SQLite write transaction. The caller's folder gate
+    // protects the indexed baseline; other folders can commit while these reads run.
+    let observations = inputs
+        .par_iter()
+        .map(|(p, old)| observe(root, p, old.as_ref(), force))
+        .collect::<Vec<_>>();
+    if observations.iter().any(|r| {
+        r.as_ref()
+            .is_err_and(|e| e.is::<crate::scanning::ScanCancelled>())
+    }) {
+        return Err(crate::scanning::ScanCancelled.into());
+    }
+    root.scan_checkpoint()?;
+    root.check()?;
+    let mut errors = Vec::new();
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    for ((path, old), observed) in inputs.into_iter().zip(observations) {
+        match observed {
+            Ok(None) if old.as_ref().is_some_and(|e| e.kind == Kind::Directory) => {
+                // A recursive removal can race enumeration. Journal its tombstone in
+                // the deepest-first unseen pass, after every child deletion.
+            }
+            Ok(observed) => record_observation(&tx, root, &path, old, observed, device, seen)?,
+            Err(e) => errors.push(format!("{e:#} [path: {path}]")),
+        }
+    }
+    tx.commit()?;
+    Ok(errors)
+}
+pub fn scan(
+    root: &Root,
+    home: &Path,
+    device: &str,
+    subpaths: Option<Vec<String>>,
+    progress: impl FnMut(u64),
+) -> Result<u64> {
+    scan_with_directories(root, home, device, subpaths, progress, |_, _| {})
+}
+
+pub fn scan_with_directories(
+    root: &Root,
+    home: &Path,
+    device: &str,
+    subpaths: Option<Vec<String>>,
+    progress: impl FnMut(u64),
+    on_directory: impl FnMut(&str, &Metadata),
+) -> Result<u64> {
+    scan_impl(root, home, device, subpaths, true, progress, on_directory)
+}
+
+pub fn scan_entries(
+    root: &Root,
+    home: &Path,
+    device: &str,
+    paths: Vec<String>,
+    progress: impl FnMut(u64),
+) -> Result<u64> {
+    scan_impl(root, home, device, Some(paths), false, progress, |_, _| {})
+}
+
+fn scan_impl(
+    root: &Root,
+    home: &Path,
+    device: &str,
+    subpaths: Option<Vec<String>>,
+    recursive: bool,
+    mut progress: impl FnMut(u64),
+    mut on_directory: impl FnMut(&str, &Metadata),
+) -> Result<u64> {
+    root.scan_checkpoint()?;
+    root.check()?;
+    let mut c = store::open(home)?;
+    let epoch = SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros() as i64;
+    let full = subpaths.is_none();
+    let regions = subpaths.clone().unwrap_or_default();
+    let mut stack = subpaths.unwrap_or_else(|| vec![String::new()]);
+    let mut batch = Vec::new();
+    let mut count = 0;
+    let mut errors = Vec::new();
+    while let Some(path) = stack.pop() {
+        root.scan_checkpoint()?;
+        if root.excluded(&path) {
+            continue;
+        }
+        let m = if path.is_empty() {
+            Some(root.dir.dir_metadata()?)
+        } else {
+            match root.dir.symlink_metadata(&path) {
+                Ok(m) => Some(m),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => {
+                    if errors.len() < 32 {
+                        errors.push(format!("{e} [path: {path}]"));
+                    }
+                    None
+                }
+            }
+        };
+        if recursive && m.as_ref().is_some_and(|m| m.is_dir() && !m.is_symlink()) {
+            on_directory(&path, m.as_ref().unwrap());
+            let children = (|| -> Result<Vec<String>> {
+                let dir = if path.is_empty() {
+                    root.dir.try_clone()?
+                } else {
+                    let parent_handle = root.parent_dir(&path, false)?;
+                    let parent = parent_handle.as_ref().unwrap_or(&root.dir);
+                    let dir = parent.open_dir(Path::new(&path).file_name().unwrap())?;
+                    let actual = dir.dir_metadata()?;
+                    let expected = m.as_ref().unwrap();
+                    if (actual.dev(), actual.ino()) != (expected.dev(), expected.ino()) {
+                        bail!("directory changed while opening");
+                    }
+                    dir
+                };
+                let mut children = Vec::new();
+                for e in dir.entries()? {
+                    root.scan_checkpoint()?;
+                    let e = e?;
+                    let name = match e.file_name().into_string() {
+                        Ok(n) => n,
+                        Err(_) => {
+                            if errors.len() < 32 {
+                                errors.push(format!("non-UTF-8 filename in {path}"));
+                            }
+                            continue;
+                        }
+                    };
+                    let child = if path.is_empty() {
+                        name
+                    } else {
+                        format!("{path}/{name}")
+                    };
+                    if !root.excluded(&child) {
+                        children.push(child);
+                    }
+                }
+                Ok(children)
+            })();
+            match children {
+                Ok(paths) => stack.extend(paths),
+                Err(e) if e.is::<crate::scanning::ScanCancelled>() => return Err(e),
+                Err(e) => {
+                    if errors.len() < 32 {
+                        errors.push(format!("{e:#} [path: {path}]"));
+                    }
+                }
+            }
+        }
+        if !path.is_empty() {
+            batch.push(path);
+        }
+        if batch.len() >= 128 || stack.is_empty() {
+            let _guard = root.gate.lock().unwrap();
+            root.check()?;
+            let batch_errors = scan_batch(&mut c, root, &batch, device, epoch, false)?;
+            errors.extend(
+                batch_errors
+                    .into_iter()
+                    .take(32usize.saturating_sub(errors.len())),
+            );
+            count += batch.len() as u64;
+            batch.clear();
+            progress(count);
+        }
+    }
+    if !errors.is_empty() {
+        bail!(
+            "scan incomplete; accessible files were indexed, deletion inference suspended: {}",
+            errors.join("; ")
+        );
+    }
+    {
+        let reconcile: Vec<Option<&str>> = if full {
+            vec![None]
+        } else {
+            regions
+                .iter()
+                .filter(|path| {
+                    recursive
+                        || root
+                            .dir
+                            .symlink_metadata(path)
+                            .err()
+                            .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                })
+                .map(|s| Some(s.as_str()))
+                .collect()
+        };
+        for region in reconcile {
+            loop {
+                let _guard = root.gate.lock().unwrap();
+                root.check()?;
+                root.scan_checkpoint()?;
+                let absent = match region {
+                    None => store::unseen(&c, &root.folder.id, epoch, 128)?,
+                    Some(path) => store::unseen_under(&c, &root.folder.id, path, epoch, 128)?,
+                };
+                if absent.is_empty() {
+                    break;
+                }
+                // Observing can wait for cooling or hash a changed file. Never do
+                // either while holding the database's shared write transaction.
+                let mut observations = Vec::with_capacity(absent.len());
+                for e in absent {
+                    root.scan_checkpoint()?;
+                    let observed = if root.excluded(&e.path) {
+                        None
+                    } else {
+                        Some(observe(root, &e.path, Some(&e), false)?)
+                    };
+                    observations.push((e, observed));
+                }
+                root.scan_checkpoint()?;
+                root.check()?;
+                let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let batch_count = observations.len() as u64;
+                for (e, observed) in observations {
+                    match observed {
+                        None => store::mark_seen(&tx, &root.folder.id, &e.path, &e.stamp, epoch)?,
+                        Some(observed) => {
+                            let path = e.path.clone();
+                            record_observation(&tx, root, &path, Some(e), observed, device, epoch)?;
+                        }
+                    }
+                }
+                tx.commit()?;
+                count += batch_count;
+                progress(count);
+            }
+        }
+    }
+    Ok(count)
+}
+
+pub fn incoming_wins(local: &Entry, remote: &Entry) -> bool {
+    if local.kind == Kind::Deleted && remote.kind != Kind::Deleted {
+        return true;
+    }
+    if remote.kind == Kind::Deleted && local.kind != Kind::Deleted {
+        return false;
+    }
+    let key = |e: &Entry| format!("{:?}:{}:{}:{:?}", e.kind, e.hash, e.mode, e.target);
+    key(remote) > key(local)
+}
+pub fn wants(c: &Connection, root: &Root, remote: &Entry) -> Result<bool> {
+    remote.validate()?;
+    if root.excluded(&remote.path) {
+        return Ok(false);
+    }
+    let old = store::get(c, &root.folder.id, &remote.path)?;
+    Ok(remote.kind == Kind::File
+        && match old {
+            None => true,
+            Some(local) => match model::relation(&local.clock, &remote.clock) {
+                Relation::Before => !local.same_bytes(remote),
+                Relation::Concurrent => !local.same_bytes(remote), // Preserve the losing branch, even when local wins.
+                _ => false,
+            },
+        })
+}
+fn archive(root: &Root, path: &str, area: &str, remove: bool) -> Result<Option<String>> {
+    let m = match root.dir.symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let dest = format!(".ysync/{area}/{}", uuid::Uuid::new_v4());
+    root.dir.create_dir_all(format!(".ysync/{area}"))?;
+    if m.is_dir() && !m.is_symlink() {
+        bail!("directory replacement requires manual resolution: {path}");
+    }
+    // Link before replacement so the final rename can publish atomically without a missing-path gap.
+    if remove {
+        root.dir.rename(path, &root.dir, &dest)?;
+    } else {
+        root.dir.hard_link(path, &root.dir, &dest)?;
+    }
+    if m.is_file() {
+        root.dir.open(&dest)?.into_std().sync_all()?;
+    }
+    write_metadata(
+        root,
+        &format!("{dest}.json"),
+        &serde_json::json!({"path":path,"saved_at":SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()}),
+    )?;
+    Ok(Some(dest))
+}
+fn write_metadata(root: &Root, path: &str, value: &impl serde::Serialize) -> Result<()> {
+    root.dir.write(path, serde_json::to_vec(value)?)?;
+    root.dir.open(path)?.into_std().sync_all()?;
+    Ok(())
+}
+pub fn apply(
+    c: &Connection,
+    root: &Root,
+    device: &str,
+    remote: &Entry,
+    temp: Option<&str>,
+) -> Result<bool> {
+    remote.validate()?;
+    root.check()?;
+    if root.excluded(&remote.path) {
+        return Ok(false);
+    }
+    // A replay or echo cannot change this path. Leave local watcher processing to the scanner.
+    if store::get(c, &root.folder.id, &remote.path)?.is_some_and(|e| {
+        matches!(
+            model::relation(&e.clock, &remote.clock),
+            Relation::Equal | Relation::After
+        )
+    }) {
+        return Ok(false);
+    }
+    // Re-read local content immediately before applying: an external editor may have beaten its watcher.
+    refresh(c, root, &remote.path, device, 0, true)?;
+    let old = store::get(c, &root.folder.id, &remote.path)?;
+    let rel = old
+        .as_ref()
+        .map(|e| model::relation(&e.clock, &remote.clock));
+    if matches!(rel, Some(Relation::After | Relation::Equal)) {
+        return Ok(false);
+    }
+    let conflict = matches!(rel, Some(Relation::Concurrent))
+        && old.as_ref().is_some_and(|e| !e.same_content(remote));
+    let keep_local = conflict && old.as_ref().is_some_and(|e| !incoming_wins(e, remote));
+    let mut next = if keep_local {
+        old.clone().unwrap()
+    } else {
+        remote.clone()
+    };
+    if let Some(old) = &old {
+        next.clock = model::merge(&old.clock, &remote.clock);
+    }
+    if keep_local {
+        if let Some(t) = temp {
+            let dest = format!(".ysync/conflicts/{}", uuid::Uuid::new_v4());
+            root.dir.create_dir_all(".ysync/conflicts")?;
+            root.dir.rename(t, &root.dir, &dest)?;
+            write_metadata(root, &format!("{dest}.json"), remote)?;
+        } else if remote.kind != Kind::Deleted {
+            root.dir.create_dir_all(".ysync/conflicts")?;
+            write_metadata(
+                root,
+                &format!(".ysync/conflicts/{}.json", uuid::Uuid::new_v4()),
+                remote,
+            )?;
+        }
+    } else if old.as_ref().is_some_and(|e| e.same_bytes(remote)) {
+        if matches!(remote.kind, Kind::File | Kind::Directory) {
+            root.dir.set_permissions(
+                &remote.path,
+                cap_std::fs::Permissions::from_std(std::fs::Permissions::from_mode(remote.mode)),
+            )?;
+            root.dir.open(&remote.path)?.into_std().sync_all()?;
+        }
+    } else if !old.as_ref().is_some_and(|e| e.same_content(remote)) {
+        root.parents(&remote.path, true)?;
+        match remote.kind {
+            Kind::Deleted => {
+                if let Some(e) = &old {
+                    if e.kind == Kind::Directory {
+                        match root.dir.remove_dir(&remote.path) {
+                            Ok(()) => {}
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(e) => {
+                                return Err(e)
+                                    .context("directory is not empty; reconcile children first");
+                            }
+                        }
+                    } else {
+                        archive(root, &remote.path, "versions", true)?;
+                    }
+                }
+            }
+            Kind::Directory => {
+                if root
+                    .dir
+                    .symlink_metadata(&remote.path)
+                    .is_ok_and(|m| !m.is_dir() || m.is_symlink())
+                {
+                    archive(
+                        root,
+                        &remote.path,
+                        if conflict { "conflicts" } else { "versions" },
+                        true,
+                    )?;
+                }
+                root.dir.create_dir_all(&remote.path)?;
+            }
+            Kind::Symlink => {
+                let temp_link = format!(".ysync/tmp/{}", uuid::Uuid::new_v4());
+                root.dir.symlink_contents(
+                    remote.target.as_ref().context("missing symlink target")?,
+                    &temp_link,
+                )?;
+                archive(
+                    root,
+                    &remote.path,
+                    if conflict { "conflicts" } else { "versions" },
+                    false,
+                )?;
+                root.dir.rename(&temp_link, &root.dir, &remote.path)?;
+            }
+            Kind::File => {
+                let t = temp.context("file changed during negotiation; retry required")?;
+                archive(
+                    root,
+                    &remote.path,
+                    if conflict { "conflicts" } else { "versions" },
+                    false,
+                )?;
+                root.dir.rename(t, &root.dir, &remote.path)?;
+            }
+        }
+        if remote.kind == Kind::Directory {
+            root.dir.set_permissions(
+                &remote.path,
+                cap_std::fs::Permissions::from_std(std::fs::Permissions::from_mode(remote.mode)),
+            )?;
+        }
+    }
+    if next.kind != Kind::Deleted {
+        next.stamp = stamp(&root.dir.symlink_metadata(&next.path)?);
+    } else {
+        next.stamp.clear();
+    }
+    store::put(c, &root.folder.id, &mut next, 0)?;
+    Ok(conflict)
+}
+
+/// Persist rename/create/delete metadata once per affected directory, before committing the batch cursor.
+pub fn sync_directories(root: &Root, entries: &[Entry]) -> Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let mut dirs = std::collections::HashSet::<PathBuf>::new();
+    for p in [
+        "",
+        ".ysync",
+        ".ysync/tmp",
+        ".ysync/versions",
+        ".ysync/conflicts",
+    ] {
+        dirs.insert(p.into());
+    }
+    for e in entries {
+        if root.excluded(&e.path) {
+            continue;
+        }
+        let path = Path::new(&e.path);
+        if e.kind == Kind::Directory {
+            dirs.insert(path.into());
+        }
+        for parent in path.ancestors().skip(1) {
+            dirs.insert(parent.into());
+        }
+    }
+    let mut dirs: Vec<_> = dirs.into_iter().collect();
+    dirs.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+    for p in dirs {
+        match root.dir.open_dir(&p) {
+            // cap-std uses O_PATH directory handles on Linux; fsync needs a readable descriptor.
+            Ok(dir) => dir
+                .open(".")?
+                .into_std()
+                .sync_all()
+                .with_context(|| format!("flushing directory {}", p.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
+pub fn temp_file(root: &Root) -> Result<(String, std::fs::File)> {
+    root.dir.create_dir_all(".ysync/tmp")?;
+    let p = format!(".ysync/tmp/{}", uuid::Uuid::new_v4());
+    let f = root
+        .dir
+        .open_with(&p, OpenOptions::new().write(true).create_new(true))?
+        .into_std();
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    Ok((p, f))
+}
+
+pub fn add_folder(home: &Path, id: &str, path: &Path, dev: bool) -> Result<()> {
+    crate::config::valid_folder_id(id)?;
+    let path = std::fs::canonicalize(path).context("folder must already exist")?;
+    if !path.is_dir() {
+        bail!("folder must be a directory");
+    }
+    let home = std::fs::canonicalize(home)?;
+    if home.starts_with(&path) || path.starts_with(&home) {
+        bail!("sync folder and daemon state must not overlap");
+    }
+    crate::config::edit(&home, |c| {
+        if c.folders
+            .iter()
+            .any(|f| f.id == id || f.path.starts_with(&path) || path.starts_with(&f.path))
+        {
+            bail!("duplicate or overlapping folder");
+        }
+        let dir = Dir::open_ambient_dir(&path, cap_std::ambient_authority())?;
+        if dir.symlink_metadata(".ysync").is_ok_and(|m| m.is_symlink()) {
+            bail!(".ysync cannot be a symlink");
+        }
+        dir.create_dir_all(".ysync/tmp")?;
+        let marker = if let Ok(m) = dir.read_to_string(".ysync/marker") {
+            m.trim().to_string()
+        } else {
+            let m = uuid::Uuid::new_v4().to_string();
+            dir.write(".ysync/marker", &m)?;
+            m
+        };
+        c.folders.push(Folder {
+            id: id.into(),
+            path,
+            marker,
+            paused: false,
+            ignores: if dev {
+                crate::config::dev_ignores()
+            } else {
+                vec![]
+            },
+        });
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config;
+    use std::collections::BTreeMap;
+    fn fixture() -> (tempfile::TempDir, tempfile::TempDir, Root, String) {
+        let state = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let id = config::initialize(state.path(), None, None).unwrap();
+        add_folder(state.path(), "test", files.path(), false).unwrap();
+        let root = Root::open(
+            config::load(state.path()).unwrap().folders.remove(0),
+            Arc::new(Mutex::new(())),
+        )
+        .unwrap();
+        (state, files, root, id)
+    }
+    #[test]
+    fn cooling_preserves_partial_hash_and_stop_interrupts_next_read() {
+        use std::{
+            sync::mpsc,
+            thread,
+            time::{Duration, Instant},
+        };
+        struct Reader {
+            data: std::io::Cursor<Vec<u8>>,
+            control: Arc<crate::scanning::ScanControl>,
+            first: Option<mpsc::Sender<()>>,
+        }
+        impl Read for Reader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.data.read(buf)?;
+                if let Some(tx) = self.first.take() {
+                    self.control.update(false, true);
+                    tx.send(()).unwrap();
+                }
+                Ok(n)
+            }
+        }
+        for stop in [false, true] {
+            let (_state, _files, mut root, _id) = fixture();
+            let control = Arc::new(crate::scanning::ScanControl::default());
+            root.scan_control = Some(control.clone());
+            let data: Vec<u8> = (0..800_000).map(|i| (i % 251) as u8).collect();
+            let expected = blake3::hash(&data).to_hex().to_string();
+            let (tx, rx) = mpsc::channel();
+            let mut reader = Reader {
+                data: std::io::Cursor::new(data),
+                control: control.clone(),
+                first: Some(tx),
+            };
+            let worker = thread::spawn(move || {
+                let result = hash_reader(&mut reader, &root);
+                (result, reader.data.position())
+            });
+            rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !control.waiting() {
+                assert!(Instant::now() < deadline);
+                thread::yield_now();
+            }
+            if stop {
+                control.stop();
+            } else {
+                control.update(false, false);
+            }
+            let (result, position) = worker.join().unwrap();
+            if stop {
+                assert!(result.unwrap_err().is::<crate::scanning::ScanCancelled>());
+                assert_eq!(position, 262144);
+            } else {
+                assert_eq!(result.unwrap(), (expected, 800_000));
+                assert_eq!(position, 800_000);
+            }
+        }
+    }
+    #[test]
+    fn cooling_retains_walk_progress_and_releases_database_writer() {
+        use std::{
+            sync::mpsc,
+            thread,
+            time::{Duration, Instant},
+        };
+        let (state, files, mut root, id) = fixture();
+        for n in 0..300 {
+            std::fs::write(files.path().join(format!("file-{n}")), b"data").unwrap();
+        }
+        let control = Arc::new(crate::scanning::ScanControl::default());
+        root.scan_control = Some(control.clone());
+        let home = state.path().to_owned();
+        let (tx, rx) = mpsc::channel();
+        let c = control.clone();
+        let worker = thread::spawn(move || {
+            let visits = std::cell::Cell::new(0);
+            let count = scan_with_directories(
+                &root,
+                &home,
+                &id,
+                None,
+                |count| {
+                    if count == 128 {
+                        c.update(false, true);
+                        tx.send(count).unwrap();
+                    }
+                },
+                |_, _| visits.set(visits.get() + 1),
+            )
+            .unwrap();
+            (
+                count,
+                visits.get(),
+                root.hashed_files.load(Ordering::Relaxed),
+            )
+        });
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), 128);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !control.waiting() {
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        let mut db = store::open(state.path()).unwrap();
+        db.busy_timeout(Duration::from_millis(100)).unwrap();
+        db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap()
+            .commit()
+            .unwrap();
+        control.update(false, false);
+        assert_eq!(worker.join().unwrap(), (300, 1, 300));
+    }
+    #[test]
+    fn cancelling_partial_scan_does_not_infer_deletions() {
+        let (state, files, mut root, id) = fixture();
+        std::fs::write(files.path().join("removed"), b"keep baseline").unwrap();
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        std::fs::remove_file(files.path().join("removed")).unwrap();
+        for n in 0..300 {
+            std::fs::write(files.path().join(format!("file-{n}")), b"data").unwrap();
+        }
+        let control = Arc::new(crate::scanning::ScanControl::default());
+        root.scan_control = Some(control.clone());
+        let error = scan(&root, state.path(), &id, None, |_| {
+            control.update(true, false);
+        })
+        .unwrap_err();
+        assert!(error.is::<crate::scanning::ScanCancelled>());
+        let db = store::open(state.path()).unwrap();
+        assert_eq!(
+            store::get(&db, "test", "removed").unwrap().unwrap().kind,
+            Kind::File
+        );
+        control.update(false, false);
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        assert_eq!(
+            store::get(&db, "test", "removed").unwrap().unwrap().kind,
+            Kind::Deleted
+        );
+    }
+    #[test]
+    fn detects_deletes_without_recreating_versions_on_rescan() {
+        let (state, files, root, id) = fixture();
+        std::fs::write(files.path().join("x"), b"hello").unwrap();
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        let c = store::open(state.path()).unwrap();
+        let a = store::get(&c, "test", "x").unwrap().unwrap();
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        assert_eq!(a.seq, store::get(&c, "test", "x").unwrap().unwrap().seq);
+        std::fs::remove_file(files.path().join("x")).unwrap();
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        assert_eq!(
+            store::get(&c, "test", "x").unwrap().unwrap().kind,
+            Kind::Deleted
+        );
+    }
+    #[test]
+    fn marker_loss_never_becomes_mass_delete() {
+        let (state, files, root, id) = fixture();
+        std::fs::write(files.path().join("x"), b"hello").unwrap();
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        std::fs::remove_file(files.path().join(".ysync/marker")).unwrap();
+        assert!(scan(&root, state.path(), &id, None, |_| {}).is_err());
+    }
+    #[test]
+    fn cached_files_still_reject_symlink_parents_and_detect_replacement() {
+        let (_state, files, root, _id) = fixture();
+        std::fs::create_dir_all(files.path().join("safe/nested")).unwrap();
+        std::fs::write(files.path().join("safe/nested/file"), b"original").unwrap();
+        let old = observe(&root, "safe/nested/file", None, false)
+            .unwrap()
+            .unwrap();
+        std::fs::rename(files.path().join("safe"), files.path().join("former")).unwrap();
+        assert!(
+            observe(&root, "safe/nested/file", Some(&old), false)
+                .unwrap()
+                .is_none()
+        );
+        std::os::unix::fs::symlink("former", files.path().join("safe")).unwrap();
+        assert!(observe(&root, "safe/nested/file", Some(&old), false).is_err());
+        std::fs::remove_file(files.path().join("safe")).unwrap();
+        std::fs::create_dir_all(files.path().join("safe/nested")).unwrap();
+        std::fs::write(files.path().join("safe/nested/file"), b"replaced").unwrap();
+        let new = observe(&root, "safe/nested/file", Some(&old), false)
+            .unwrap()
+            .unwrap();
+        assert_ne!(new.hash, old.hash);
+        assert_eq!(new.hash, blake3::hash(b"replaced").to_hex().as_str());
+    }
+
+    #[test]
+    fn symlink_parents_cannot_escape_root() {
+        let (_s, files, root, _id) = fixture();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), files.path().join("escape")).unwrap();
+        assert!(root.parents("escape/secret", true).is_err());
+        assert!(!outside.path().join("secret").exists());
+    }
+    #[test]
+    fn concurrent_edit_beats_delete() {
+        let e = Entry {
+            path: "x".into(),
+            kind: Kind::File,
+            size: 1,
+            hash: "a".repeat(64),
+            target: None,
+            mode: 0o644,
+            clock: BTreeMap::new(),
+            seq: 0,
+            stamp: String::new(),
+        };
+        let mut d = e.clone();
+        d.kind = Kind::Deleted;
+        assert!(incoming_wins(&d, &e));
+        assert!(!incoming_wins(&e, &d));
+    }
+    #[test]
+    fn unsupported_path_does_not_block_other_files_or_infer_deletions() {
+        let (state, files, root, id) = fixture();
+        std::fs::write(files.path().join("old"), b"keep deletion history").unwrap();
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        std::fs::remove_file(files.path().join("old")).unwrap();
+        std::fs::write(files.path().join("good"), b"still index me").unwrap();
+        let _socket = std::os::unix::net::UnixListener::bind(files.path().join("socket")).unwrap();
+        assert!(scan(&root, state.path(), &id, None, |_| {}).is_err());
+        let c = store::open(state.path()).unwrap();
+        assert!(store::get(&c, "test", "good").unwrap().is_some());
+        assert_eq!(
+            store::get(&c, "test", "old").unwrap().unwrap().kind,
+            Kind::File
+        );
+    }
+    #[test]
+    fn directory_disappearing_during_scan_is_journaled_after_children() {
+        let (state, files, root, id) = fixture();
+        std::fs::create_dir(files.path().join("dir")).unwrap();
+        std::fs::write(files.path().join("dir/child"), b"data").unwrap();
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        std::fs::remove_dir_all(files.path().join("dir")).unwrap();
+        let mut c = store::open(state.path()).unwrap();
+        scan_batch(&mut c, &root, &["dir".into()], &id, 2, false).unwrap();
+        assert_eq!(
+            store::get(&c, "test", "dir").unwrap().unwrap().kind,
+            Kind::Directory
+        );
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        let dir = store::get(&c, "test", "dir").unwrap().unwrap();
+        let child = store::get(&c, "test", "dir/child").unwrap().unwrap();
+        assert_eq!(dir.kind, Kind::Deleted);
+        assert_eq!(child.kind, Kind::Deleted);
+        assert!(child.seq < dir.seq);
+    }
+    #[test]
+    fn scoped_delete_only_visits_its_subtree_and_journals_children_first() {
+        let (state, files, root, id) = fixture();
+        std::fs::create_dir_all(files.path().join("gone/sub")).unwrap();
+        std::fs::write(files.path().join("gone/sub/child"), b"data").unwrap();
+        std::fs::write(files.path().join("gone-neighbor"), b"keep").unwrap();
+        for i in 0..200 {
+            std::fs::write(files.path().join(format!("unrelated-{i}")), b"same").unwrap();
+        }
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        let hashes = root.hashed_files.load(Ordering::Relaxed);
+        let c = store::open(state.path()).unwrap();
+        let old = store::get(&c, "test", "gone-neighbor").unwrap().unwrap();
+        std::fs::remove_dir_all(files.path().join("gone")).unwrap();
+        let count = scan(&root, state.path(), &id, Some(vec!["gone".into()]), |_| {}).unwrap();
+        assert!(
+            count <= 4,
+            "scoped deletion checked unrelated paths: {count}"
+        );
+        assert_eq!(root.hashed_files.load(Ordering::Relaxed), hashes);
+        let dir = store::get(&c, "test", "gone").unwrap().unwrap();
+        let sub = store::get(&c, "test", "gone/sub").unwrap().unwrap();
+        let child = store::get(&c, "test", "gone/sub/child").unwrap().unwrap();
+        assert_eq!(dir.kind, Kind::Deleted);
+        assert!(child.seq < sub.seq && sub.seq < dir.seq);
+        assert_eq!(
+            old.seq,
+            store::get(&c, "test", "gone-neighbor")
+                .unwrap()
+                .unwrap()
+                .seq
+        );
+    }
+    #[test]
+    fn directory_metadata_and_echo_events_do_not_rehash_unchanged_files() {
+        let (state, files, root, id) = fixture();
+        std::fs::create_dir(files.path().join("dir")).unwrap();
+        std::fs::write(files.path().join("dir/file"), b"unchanged").unwrap();
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        let hashes = root.hashed_files.load(Ordering::Relaxed);
+        assert_eq!(
+            scan_entries(&root, state.path(), &id, vec!["dir".into()], |_| {}).unwrap(),
+            1
+        );
+        scan_entries(&root, state.path(), &id, vec!["dir/file".into()], |_| {}).unwrap();
+        scan(&root, state.path(), &id, Some(vec!["dir".into()]), |_| {}).unwrap();
+        assert_eq!(root.hashed_files.load(Ordering::Relaxed), hashes);
+    }
+}

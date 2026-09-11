@@ -1,0 +1,94 @@
+{
+  "dataset": "6000 files of 4096 bytes in 60 branches, each 9 directories deep; 6540 indexed entries",
+  "scope": "Single trial per platform/version. Warm filesystem cache, fresh index followed by a daemon restart, two hash workers, no peers. Wall times include startup and ~1s status refresh; Linux wall measurements are dominated by that floor.",
+  "macos": {
+    "before": {
+      "label": "before",
+      "files": 6000,
+      "file_bytes": 4096,
+      "directory_depth": 9,
+      "scope": "Synthetic nested tree, warm filesystem cache, two hash workers; fresh index then daemon restart. Single trial, startup/status polling included.",
+      "initial_index": {
+        "wall_seconds": 3.098,
+        "cpu_seconds": 4.02,
+        "checked_entries": 6540,
+        "hashed_files": 6000
+      },
+      "warm_reconciliation": {
+        "wall_seconds": 2.067,
+        "cpu_seconds": 2.91,
+        "checked_entries": 6540,
+        "hashed_files": 0
+      }
+    },
+    "after": {
+      "label": "after",
+      "files": 6000,
+      "file_bytes": 4096,
+      "directory_depth": 9,
+      "scope": "Synthetic nested tree, warm filesystem cache, two hash workers; fresh index then daemon restart. Single trial, startup/status polling included.",
+      "initial_index": {
+        "wall_seconds": 2.076,
+        "cpu_seconds": 1.75,
+        "checked_entries": 6540,
+        "hashed_files": 6000
+      },
+      "warm_reconciliation": {
+        "wall_seconds": 1.053,
+        "cpu_seconds": 1.05,
+        "checked_entries": 6540,
+        "hashed_files": 0
+      }
+    }
+  },
+  "linux": {
+    "before": {
+      "label": "before",
+      "files": 6000,
+      "file_bytes": 4096,
+      "directory_depth": 9,
+      "scope": "Synthetic nested tree, warm filesystem cache, two hash workers; fresh index then daemon restart. Single trial, startup/status polling included.",
+      "initial_index": {
+        "wall_seconds": 1.054,
+        "cpu_seconds": 0.47,
+        "checked_entries": 6540,
+        "hashed_files": 6000
+      },
+      "warm_reconciliation": {
+        "wall_seconds": 1.055,
+        "cpu_seconds": 0.32,
+        "checked_entries": 6540,
+        "hashed_files": 0
+      }
+    },
+    "after": {
+      "label": "after",
+      "files": 6000,
+      "file_bytes": 4096,
+      "directory_depth": 9,
+      "scope": "Synthetic nested tree, warm filesystem cache, two hash workers; fresh index then daemon restart. Single trial, startup/status polling included.",
+      "initial_index": {
+        "wall_seconds": 1.055,
+        "cpu_seconds": 0.45,
+        "checked_entries": 6540,
+        "hashed_files": 6000
+      },
+      "warm_reconciliation": {
+        "wall_seconds": 1.054,
+        "cpu_seconds": 0.34,
+        "checked_entries": 6540,
+        "hashed_files": 0
+      }
+    }
+  },
+  "measured_binary_sha256": {
+    "mac_before": "8dcfd6ba8f9864d43b4111a5f1a622e2914ebe314a698a314d884bdfb87658dc",
+    "mac_after": "25d46fd5a3f90c2799a0ebf73cd701ee0a751cd723bb39fc79b4da34d0b1f3cf",
+    "linux_after": "ef2c8d3b053e95de31ab280fa663ff03a580bae00a62e7c1f2346c1df29a3dab"
+  },
+  "deep_path_diagnostic": {
+    "entries_checked": 389,
+    "seconds": 0.569,
+    "cause": "Permission denied (os error 13); three sampled failing regular files have mode 000, owner UID 501, and os.access(R_OK) false. Source permissions unchanged."
+  }
+}

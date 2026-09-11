@@ -1,0 +1,14 @@
+/target
+*.log
+.DS_Store
+
+
+/dist
+__pycache__/
+
+# Runtime state never belongs in the source repository.
+/.ysync/
+/state/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

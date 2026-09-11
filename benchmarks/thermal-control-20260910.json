@@ -1,0 +1,129 @@
+{
+  "initial_cooling": {
+    "thermal": {
+      "max_temp_c": 40,
+      "resume_temp_c": 35,
+      "temperature_c": 55.375,
+      "cooling": true,
+      "error": null
+    },
+    "folder": {
+      "phase": "scanning",
+      "scanned": 0,
+      "files": 0,
+      "bytes": 0,
+      "last_scan": null,
+      "error": null,
+      "watcher": "native",
+      "full_scans": 1,
+      "scoped_scans": 0,
+      "checked_entries": 0,
+      "hashed_files": 0,
+      "hashed_bytes": 0,
+      "watch_events": 0,
+      "coalesced_events": 0,
+      "ignored_events": 0,
+      "watch_overflows": 0,
+      "queued_paths": 0,
+      "native_watches": 2,
+      "scan_directories": 0,
+      "scan_waiting_for_cooling": true
+    }
+  },
+  "initial_resumed": {
+    "thermal": {
+      "max_temp_c": 75,
+      "resume_temp_c": 70,
+      "temperature_c": 55.0,
+      "cooling": false,
+      "error": null
+    },
+    "folder": {
+      "phase": "watching",
+      "scanned": 1,
+      "files": 1,
+      "bytes": 17,
+      "last_scan": 1789105047,
+      "error": null,
+      "watcher": "native",
+      "full_scans": 1,
+      "scoped_scans": 0,
+      "checked_entries": 1,
+      "hashed_files": 1,
+      "hashed_bytes": 17,
+      "watch_events": 7,
+      "coalesced_events": 0,
+      "ignored_events": 7,
+      "watch_overflows": 0,
+      "queued_paths": 0,
+      "native_watches": 2,
+      "scan_directories": 1,
+      "scan_waiting_for_cooling": false
+    }
+  },
+  "idle_cooling": {
+    "thermal": {
+      "max_temp_c": 40,
+      "resume_temp_c": 35,
+      "temperature_c": 54.75,
+      "cooling": true,
+      "error": null
+    },
+    "folder": {
+      "phase": "watching",
+      "scanned": 1,
+      "files": 1,
+      "bytes": 17,
+      "last_scan": 1789105047,
+      "error": null,
+      "watcher": "native",
+      "full_scans": 1,
+      "scoped_scans": 0,
+      "checked_entries": 1,
+      "hashed_files": 1,
+      "hashed_bytes": 17,
+      "watch_events": 7,
+      "coalesced_events": 0,
+      "ignored_events": 7,
+      "watch_overflows": 0,
+      "queued_paths": 0,
+      "native_watches": 2,
+      "scan_directories": 1,
+      "scan_waiting_for_cooling": false
+    }
+  },
+  "scoped_cooling": {
+    "thermal": {
+      "max_temp_c": 40,
+      "resume_temp_c": 35,
+      "temperature_c": 54.625,
+      "cooling": true,
+      "error": null
+    },
+    "folder": {
+      "phase": "updating",
+      "scanned": 0,
+      "files": 1,
+      "bytes": 17,
+      "last_scan": 1789105047,
+      "error": null,
+      "watcher": "native",
+      "full_scans": 1,
+      "scoped_scans": 1,
+      "checked_entries": 1,
+      "hashed_files": 1,
+      "hashed_bytes": 17,
+      "watch_events": 11,
+      "coalesced_events": 2,
+      "ignored_events": 8,
+      "watch_overflows": 0,
+      "queued_paths": 0,
+      "native_watches": 2,
+      "scan_directories": 0,
+      "scan_waiting_for_cooling": true
+    }
+  },
+  "stop_seconds": 0.03135454900075274,
+  "binary_sha256": "16b2edb18e54dc9813ee55dde145cca86b81041a028b9295f5cdd40e6962e3d7",
+  "scope": "two tiny files, no peers; thresholds moved around actual CPU temperature"
+}

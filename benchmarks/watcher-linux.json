@@ -1,0 +1,18 @@
+{
+  "files": 10000,
+  "ignored_directories": 1000,
+  "native_registrations": 103,
+  "watcher": "native",
+  "idle_seconds": 4.0,
+  "idle_cpu_seconds": 0.0,
+  "idle_cpu_percent_of_one_core": 0.0,
+  "idle_checked_entries": 0,
+  "burst_writes": 200,
+  "burst_checked_entries": 1,
+  "burst_hashed_files": 1,
+  "delete_checked_entries": 1,
+  "delete_hashed_files": 0,
+  "extra_full_scans": 0,
+  "ignored_checked_entries": 0,
+  "scope": "One daemon, synthetic disk-backed tree when --base-dir is disk-backed; CPU sample includes the complete daemon, not just watcher callbacks. Single trial; OS CPU accounting resolution applies."
+}

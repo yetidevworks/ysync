@@ -1,0 +1,29 @@
+{
+  "limits": {
+    "max_user_watches": 524288,
+    "max_user_instances": 1024,
+    "max_queued_events": 16384
+  },
+  "folders": [
+    {
+      "id": "projects",
+      "paused": false,
+      "indexed_directories": 235209,
+      "estimated_watches": 235211,
+      "error": null
+    },
+    {
+      "id": "workspace",
+      "paused": true,
+      "indexed_directories": 418246,
+      "estimated_watches": 418248,
+      "error": null
+    }
+  ],
+  "active_estimated_watches": 235211,
+  "all_estimated_watches": 653459,
+  "estimates_available": true,
+  "all_folders_exceed_limit": true,
+  "suggested_max_user_watches": 851968,
+  "note": "Estimates use cached directory records and current exclusions, plus root/control watches. An incomplete or stale index can undercount or overcount. Linux limits are shared with other processes of this user; their usage is not included. No source tree was walked and no kernel settings were changed."
+}

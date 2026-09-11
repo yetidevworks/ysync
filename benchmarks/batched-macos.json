@@ -1,0 +1,10 @@
+{
+  "files": 2000,
+  "bytes": 8192000,
+  "bootstrap_seconds": 8.691,
+  "files_per_second": 230.1,
+  "payload_MB_per_second": 0.94,
+  "edit_latency_ms": 50.4,
+  "environment": "two local daemons, loopback, same filesystem",
+  "verified_all_payloads": true
+}

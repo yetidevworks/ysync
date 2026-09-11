@@ -1,0 +1,32 @@
+{
+  "bytes": 1073741824,
+  "files": 64,
+  "scope": "warm-cache scan/hash/index only; no network or receiver writes",
+  "trials": [
+    {
+      "MB_per_second": 1923.5602386388705,
+      "seconds": 0.558205458,
+      "workers": 1
+    },
+    {
+      "MB_per_second": 3947.695734421524,
+      "seconds": 0.271992042,
+      "workers": 2
+    },
+    {
+      "MB_per_second": 7783.955336088994,
+      "seconds": 0.137942958,
+      "workers": 4
+    },
+    {
+      "MB_per_second": 14299.50158915783,
+      "seconds": 0.075089458,
+      "workers": 8
+    },
+    {
+      "MB_per_second": 16053.052036968034,
+      "seconds": 0.066887083,
+      "workers": 16
+    }
+  ]
+}
