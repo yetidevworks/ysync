@@ -1,7 +1,6 @@
 class Ysync < Formula
   desc "Direct encrypted file synchronization for macOS and Linux"
   homepage "https://github.com/yetidevworks/ysync"
-  version "@VERSION@"
   license "MIT"
 
   on_macos do
@@ -53,7 +52,7 @@ class Ysync < Formula
   test do
     assert_match version.to_s, shell_output("#{bin}/ysync --version")
     system bin/"ysync", "--home", testpath/"state", "init", "--name", "brew-test", "--listen", "127.0.0.1:0"
-    assert_predicate testpath/"state/identity.json", :exist?
-    assert_predicate testpath/"state/index.sqlite", :exist?
+    assert_path_exists testpath/"state/identity.json"
+    assert_path_exists testpath/"state/index.sqlite"
   end
 end

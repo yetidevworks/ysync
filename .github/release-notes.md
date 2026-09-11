@@ -11,6 +11,8 @@ cargo install \
 Or install a prebuilt binary with Homebrew:
 
 ```sh
+# If your Homebrew requires tap trust, run this first:
+# brew trust --formula yetidevworks/ysync/ysync
 brew tap yetidevworks/ysync
 brew install yetidevworks/ysync/ysync
 ```

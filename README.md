@@ -11,6 +11,8 @@ Direct, encrypted, bidirectional file synchronization for macOS and Linux. A Rus
 Install a prebuilt binary on macOS or Linux:
 
 ```sh
+# If your Homebrew requires tap trust, run this first:
+# brew trust --formula yetidevworks/ysync/ysync
 brew tap yetidevworks/ysync
 brew install yetidevworks/ysync/ysync
 ysync --version
