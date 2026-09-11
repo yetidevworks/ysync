@@ -6,7 +6,7 @@ Direct, encrypted, bidirectional file synchronization for macOS and Linux. A Rus
 
 ## Install
 
-The repository is private. Use Rust/Cargo 1.88 or newer, a C compiler, and a GitHub SSH identity with access to `yetidevworks/ysync`. SQLite is bundled; no separate SQLite development package is required.
+The repository is private. Use Rust/Cargo 1.88 or newer, a C compiler, and GitHub credentials with access to `yetidevworks/ysync`. SQLite is bundled; no separate SQLite development package is required.
 
 Install the tagged version on either macOS or Linux:
 
@@ -15,6 +15,16 @@ CARGO_NET_GIT_FETCH_WITH_CLI=true cargo install \
   --git ssh://git@github.com/yetidevworks/ysync.git \
   --tag v0.1.0 --locked ysync
 ysync --version
+```
+
+If you use GitHub CLI authentication instead of an SSH key, initialize its Git credential helper and use HTTPS:
+
+```sh
+gh auth login                 # only if this machine is not already authenticated
+gh auth setup-git
+CARGO_NET_GIT_FETCH_WITH_CLI=true cargo install \
+  --git https://github.com/yetidevworks/ysync.git \
+  --tag v0.1.0 --locked ysync
 ```
 
 Cargo installs the command under `~/.cargo/bin`; make sure that directory is on your PATH. With a rustup installation, `source "$HOME/.cargo/env"` activates it in the current shell. Installation builds the binary but does not start a service or change your sync configuration. This crate is not published to crates.io. Cargo's [Git installation options](https://doc.rust-lang.org/cargo/commands/cargo-install.html) support selecting a tag and using the committed dependency lockfile.
