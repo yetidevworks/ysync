@@ -26,13 +26,13 @@ Use Rust/Cargo 1.88 or newer and a C compiler. SQLite is bundled; no separate SQ
 
 ```sh
 cargo install --git https://github.com/yetidevworks/ysync.git \
-  --tag v0.2.4 --locked ysync
+  --tag v0.2.5 --locked ysync
 ysync --version
 ```
 
 Cargo installs the command under `~/.cargo/bin`; make sure that directory is on your PATH. With a rustup installation, `source "$HOME/.cargo/env"` activates it in the current shell. Installation builds the binary but does not start a service or change your sync configuration. This crate is not published to crates.io. Cargo's [Git installation options](https://doc.rust-lang.org/cargo/commands/cargo-install.html) support selecting a tag and using the committed dependency lockfile.
 
-For the latest main branch, replace `--tag v0.2.4` with `--branch main`. To update an installed service: stop it, install the desired tag with `--force`, and start it again. Reinstall the service definition if the binary's installation path changes.
+For the latest main branch, replace `--tag v0.2.5` with `--branch main`. To update an installed service: stop it, install the desired tag with `--force`, and start it again. Reinstall the service definition if the binary's installation path changes.
 
 ### Download a binary
 
@@ -50,13 +50,13 @@ Linux archives require glibc 2.35 or newer. Build with Cargo on older systems. M
 For example, on an Apple Silicon Mac:
 
 ```sh
-curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.2.4/ysync-v0.2.0-aarch64-apple-darwin.tar.gz
-curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.2.4/SHA256SUMS
-shasum -a 256 ysync-v0.2.0-aarch64-apple-darwin.tar.gz
+curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.2.5/ysync-v0.2.5-aarch64-apple-darwin.tar.gz
+curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.2.5/SHA256SUMS
+shasum -a 256 ysync-v0.2.5-aarch64-apple-darwin.tar.gz
 # Compare the result with its matching entry in SHA256SUMS.
-tar -xzf ysync-v0.2.0-aarch64-apple-darwin.tar.gz
+tar -xzf ysync-v0.2.5-aarch64-apple-darwin.tar.gz
 mkdir -p ~/.local/bin
-install -m 755 ysync-v0.2.0-aarch64-apple-darwin/ysync ~/.local/bin/ysync
+install -m 755 ysync-v0.2.5-aarch64-apple-darwin/ysync ~/.local/bin/ysync
 ```
 
 Put `~/.local/bin` on your PATH if you use this location. `ysync --help` shows all commands.
@@ -121,7 +121,8 @@ The default listener is TCP port **39280**, on all IPv4 interfaces. Use `init --
 ## Monitor and manage
 
 ```sh
-ysync monitor                 # live terminal activity, rates, device and folder state
+ysync monitor                 # interactive Ratatui dashboard
+ysync monitor --plain         # legacy text monitor
 ysync status                  # one snapshot
 ysync status --json           # machine-readable snapshot; inspect updated/pid for freshness
 ysync peer list
@@ -131,6 +132,23 @@ ysync folder list
 ysync folder pause code
 ysync folder resume code
 ```
+
+The Ratatui dashboard shows payload rates with bounded history graphs, a selectable folder table, watcher diagnostics, device connection/approval state, and a searchable recent activity feed. It reads the daemon snapshot once per second without scanning folders or opening the sync index. It adapts to terminal resizing (minimum 60 columns × 20 rows); use `d` for full folder/device details on smaller terminals.
+
+| Key | Action |
+| --- | --- |
+| `Tab` | Switch focus between folders and activity |
+| `↑` / `↓`, `j` / `k` | Select a folder or activity row |
+| `Page Up` / `Page Down` | Move ten rows |
+| `d` / `Enter` | Expand folder/device diagnostics; arrows scroll, `Esc` closes |
+| `f` | Cycle Activity, All, Index, and Issues filters |
+| `/` | Search event kind, folder, or path; `Enter` applies |
+| `x` | Clear the search |
+| `Space` | Freeze/resume the display; synchronization continues |
+| `?` | Show help |
+| `q` / `Ctrl-C` | Exit the monitor |
+
+The activity window is bounded to 64 daemon events, including at most 16 index records so reconciliation does not evict every useful message. It is not a persistent log. **Index** means an incoming record was reconciled; it does not mean a working file was overwritten. Receive payload includes preserved incoming conflict versions. JSON field `received_entries` retains its existing meaning as reconciled records. Graphs show up to 60 observed snapshots with independent scales and reset when the daemon restarts. The header identifies monitor and daemon versions separately; older daemons report an unknown version.
 
 The monitor is independent of the service. Leaving it does not stop synchronization. Its rates count file payload bytes, not protocol overhead. File totals are refreshed on full scans. `watching` means the local scanner is caught up, **not** that every remote device has finished receiving. Recent activity includes transferred paths, connection failures, approval requests, and conflicts. Snapshots older than five seconds are marked stale. If native watchers are unavailable (for example, exhausted Linux inotify limits), the phase shows `polling`; the configured full-scan interval controls change detection.
 

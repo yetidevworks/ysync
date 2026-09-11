@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.5
+
+- Replace `ysync monitor` with a responsive Ratatui dashboard: payload sparklines, selectable folders, expanded watcher/device diagnostics, keyboard navigation, and searchable/filterable activity. Keep `monitor --plain`, `status`, and `status --json` available.
+- Label incoming reconciliation records as index activity rather than file transfers. Bound index events to 16 of the 64 recent events so they do not flood out other activity; cumulative counters remain unchanged.
+- Show daemon and monitor versions separately, suppress stale rates, reset chart history on daemon restart, and restore the terminal on exit, error, panic, and handled termination signals. Monitoring remains read-only and does not scan sync trees.
+
 ## 0.2.4
 
 - Do not create missing parent directories when applying historical deletions at a fresh receiver. The old behavior could invent empty directories and create false directory/deletion conflicts.

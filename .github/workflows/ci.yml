@@ -35,6 +35,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
+      - run: python3 scripts/check_monitor_pty.py --binary target/debug/ysync
   msrv:
     runs-on: ubuntu-22.04
     timeout-minutes: 15

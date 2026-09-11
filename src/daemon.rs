@@ -80,6 +80,8 @@ pub struct Event {
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Status {
+    #[serde(default)]
+    pub daemon_version: String,
     pub pid: u32,
     pub started: u64,
     pub updated: u64,
@@ -125,6 +127,7 @@ impl Shared {
             sent: AtomicU64::new(0),
             received: AtomicU64::new(0),
             status: Mutex::new(Status {
+                daemon_version: env!("CARGO_PKG_VERSION").into(),
                 pid: std::process::id(),
                 started: now(),
                 device: id.clone(),
@@ -228,6 +231,13 @@ impl Shared {
             folder: folder.map(str::to_owned),
             detail: detail.chars().take(500).collect(),
         });
+        // Keep index churn from evicting every transfer, error, and conflict message.
+        if kind == "received"
+            && s.events.iter().filter(|e| e.kind == "received").count() > 16
+            && let Some(index) = s.events.iter().position(|e| e.kind == "received")
+        {
+            s.events.remove(index);
+        }
         while s.events.len() > 64 {
             s.events.pop_front();
         }
@@ -1026,7 +1036,11 @@ pub fn monitor(home: &Path, once: bool) -> Result<()> {
         for e in s.events.iter().rev().take(10) {
             println!(
                 "  {:<10} {:<14} {}",
-                e.kind,
+                if e.kind == "received" {
+                    "index"
+                } else {
+                    &e.kind
+                },
                 e.folder.as_deref().unwrap_or(""),
                 sanitize(&e.detail)
             );
@@ -1047,6 +1061,32 @@ fn sanitize(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn index_churn_keeps_non_index_activity_visible() {
+        let home = tempfile::tempdir().unwrap();
+        let shared = Shared::new(home.path(), "device".into(), "localhost:0".into());
+        shared.event("error", None, "connection failed");
+        for n in 0..1000 {
+            shared.file_received("folder", &format!("path-{n}"));
+        }
+        let status = shared.status.lock().unwrap();
+        assert_eq!(status.received_entries, 1000);
+        assert_eq!(
+            status
+                .events
+                .iter()
+                .filter(|e| e.kind == "received")
+                .count(),
+            16
+        );
+        assert!(status.events.iter().any(|e| e.kind == "error"));
+        drop(status);
+        for n in 0..100 {
+            shared.event("sent", None, &format!("file-{n}"));
+        }
+        assert_eq!(shared.status.lock().unwrap().events.len(), 64);
+    }
 
     #[test]
     fn watch_quota_exhaustion_waits_for_reconciliation() {

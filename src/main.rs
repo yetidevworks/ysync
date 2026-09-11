@@ -37,7 +37,11 @@ enum Cmd {
     /// Run the daemon in the foreground.
     Serve,
     /// Display a live terminal activity monitor.
-    Monitor,
+    Monitor {
+        /// Use the legacy text display.
+        #[arg(long)]
+        plain: bool,
+    },
     /// Show the latest daemon activity snapshot.
     Status {
         #[arg(long)]
@@ -203,7 +207,13 @@ fn main() -> Result<()> {
             ConflictCmd::Resolve { .. } => bail!("explicit --keep-local is required"),
         },
         Cmd::Serve => daemon::serve(&home)?,
-        Cmd::Monitor => daemon::monitor(&home, false)?,
+        Cmd::Monitor { plain } => {
+            if plain {
+                daemon::monitor(&home, false)?;
+            } else {
+                ysync::monitor::run(&home)?;
+            }
+        }
         Cmd::Status { json } => {
             if json {
                 println!(
