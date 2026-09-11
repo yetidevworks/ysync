@@ -36,7 +36,9 @@ impl Entry {
         self.kind == other.kind && self.hash == other.hash && self.target == other.target
     }
     pub fn same_content(&self, other: &Self) -> bool {
-        self.same_bytes(other) && self.mode == other.mode
+        // Linux symlinks report 0777 while macOS may report 0755. We do not
+        // transfer symlink permissions; their target defines their content.
+        self.same_bytes(other) && (self.kind == Kind::Symlink || self.mode == other.mode)
     }
     pub fn validate(&self) -> Result<()> {
         validate_path(&self.path)?;

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.4
+
+- Do not create missing parent directories when applying historical deletions at a fresh receiver. The old behavior could invent empty directories and create false directory/deletion conflicts.
+- Compare symbolic links by target rather than platform-specific permission bits. File and directory permissions still participate in conflict detection; differing symlink targets remain conflicts.
+- Add regressions for fresh bootstrap across multiple tombstone batches, absence of phantom parents, unchanged symlink inodes, stable rescans, and conflicting link targets. Existing recorded conflicts are retained for deliberate resolution.
+
 ## 0.2.3
 
 - Flush sibling directories concurrently with a reusable pool capped at eight disk workers. Finish each deeper level before its parents, and finish all file/directory flushes before acknowledging or committing the cursor. Failed flushes join in-flight work and abort acknowledgement.

@@ -156,6 +156,43 @@ fn settled(a: &Device, b: &Device) {
 }
 
 #[test]
+fn fresh_receiver_accepts_old_deletions_without_inventing_directories() {
+    let mut a = Device::new("old-deletions");
+    let mut b = Device::new("fresh-receiver");
+    // Keep enough tombstones to cross multiple protocol batches. The receiver
+    // never saw either the former files or their parent directory versions.
+    for n in 0..260 {
+        a.write(&format!("retired/objects/{n:03}/old.bin"), b"obsolete");
+    }
+    let root = engine::Root::open(
+        config::load(a.state.path()).unwrap().folders.remove(0),
+        std::sync::Arc::new(std::sync::Mutex::new(())),
+    )
+    .unwrap();
+    engine::scan(&root, a.state.path(), &a.id, None, |_| {}).unwrap();
+    fs::remove_dir_all(a.path("retired")).unwrap();
+    engine::scan(&root, a.state.path(), &a.id, None, |_| {}).unwrap();
+    a.write("live.txt", b"still live");
+    a.dial(&b);
+    b.dial(&a);
+    a.start();
+    b.start();
+    wait("live file after historical deletions", &a, &b, || {
+        equals(&b, "live.txt", b"still live")
+    });
+    settled(&a, &b);
+    for d in [&a, &b] {
+        assert!(!d.path("retired").exists());
+        let c = ysync::store::open(d.state.path()).unwrap();
+        assert!(ysync::conflicts::list(&c).unwrap().is_empty());
+    }
+    b.write("reverse.txt", b"new on receiver");
+    wait("reverse edit after deletion bootstrap", &a, &b, || {
+        equals(&a, "reverse.txt", b"new on receiver")
+    });
+}
+
+#[test]
 fn scoped_success_does_not_clear_incomplete_full_scan() {
     let mut device = Device::new("incomplete-scan");
     config::edit(device.state.path(), |c| {

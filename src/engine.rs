@@ -751,7 +751,12 @@ pub fn apply(
             root.dir.open(&remote.path)?.into_std().sync_all()?;
         }
     } else if !old.as_ref().is_some_and(|e| e.same_content(remote)) {
-        root.parents(&remote.path, true)?;
+        // A tombstone may arrive at a fresh receiver that never had the file.
+        // Creating its parents invents directories, which the watcher can then
+        // journal as independent local creations and conflict with later deletes.
+        if remote.kind != Kind::Deleted {
+            root.parents(&remote.path, true)?;
+        }
         match remote.kind {
             Kind::Deleted => {
                 if let Some(e) = &old {
@@ -944,6 +949,30 @@ mod tests {
         (state, files, root, id)
     }
     #[test]
+    fn absent_tombstone_does_not_create_parent_directories() {
+        let (state, files, root, id) = fixture();
+        let c = store::open(state.path()).unwrap();
+        let remote = Entry {
+            path: "retired/objects/00/old-object".into(),
+            kind: Kind::Deleted,
+            size: 0,
+            hash: String::new(),
+            target: None,
+            mode: 0,
+            clock: BTreeMap::from([("a".repeat(64), 2)]),
+            seq: 1,
+            stamp: String::new(),
+        };
+        assert!(!apply(&c, &root, &id, &remote, None).unwrap());
+        sync_directories(&root, std::slice::from_ref(&remote)).unwrap();
+        assert!(!files.path().join("retired").exists());
+        let stored = store::get(&c, "test", &remote.path).unwrap().unwrap();
+        assert_eq!(stored.kind, Kind::Deleted);
+        assert_eq!(stored.clock, remote.clock);
+        assert!(crate::conflicts::list(&c).unwrap().is_empty());
+    }
+
+    #[test]
     fn cooling_preserves_partial_hash_and_stop_interrupts_next_read() {
         use std::{
             sync::mpsc,
@@ -1123,6 +1152,39 @@ mod tests {
                 merged.seq
             );
         }
+    }
+
+    #[test]
+    fn symlink_mode_differences_do_not_conflict_or_rewrite_links() {
+        let (state, files, root, id) = fixture();
+        std::os::unix::fs::symlink("target", files.path().join("link")).unwrap();
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        let c = store::open(state.path()).unwrap();
+        let original = store::get(&c, "test", "link").unwrap().unwrap();
+        let before = stamp(&root.dir.symlink_metadata("link").unwrap());
+        let mut incoming = original.clone();
+        incoming.mode = if original.mode == 0o777 { 0o755 } else { 0o777 };
+        incoming.clock = BTreeMap::from([("a".repeat(64), 1)]);
+        assert!(!apply(&c, &root, &id, &incoming, None).unwrap());
+        let merged = store::get(&c, "test", "link").unwrap().unwrap();
+        assert_eq!(merged.clock, model::merge(&original.clock, &incoming.clock));
+        assert_eq!(stamp(&root.dir.symlink_metadata("link").unwrap()), before);
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        let rescanned = store::get(&c, "test", "link").unwrap().unwrap();
+        assert_eq!(rescanned.seq, merged.seq);
+        assert!(crate::conflicts::list(&c).unwrap().is_empty());
+
+        // A different link target is still a real concurrent conflict.
+        incoming.target = Some("different-target".into());
+        incoming.hash = blake3::hash(b"different-target").to_hex().to_string();
+        incoming.clock = BTreeMap::from([("b".repeat(64), 1)]);
+        assert!(apply(&c, &root, &id, &incoming, None).unwrap());
+        assert_eq!(
+            std::fs::read_link(files.path().join("link")).unwrap(),
+            Path::new("target")
+        );
+        assert_eq!(stamp(&root.dir.symlink_metadata("link").unwrap()), before);
+        assert_eq!(crate::conflicts::list(&c).unwrap().len(), 1);
     }
 
     #[test]
