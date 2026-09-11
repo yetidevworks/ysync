@@ -26,13 +26,13 @@ Use Rust/Cargo 1.88 or newer and a C compiler. SQLite is bundled; no separate SQ
 
 ```sh
 cargo install --git https://github.com/yetidevworks/ysync.git \
-  --tag v0.2.0 --locked ysync
+  --tag v0.2.1 --locked ysync
 ysync --version
 ```
 
 Cargo installs the command under `~/.cargo/bin`; make sure that directory is on your PATH. With a rustup installation, `source "$HOME/.cargo/env"` activates it in the current shell. Installation builds the binary but does not start a service or change your sync configuration. This crate is not published to crates.io. Cargo's [Git installation options](https://doc.rust-lang.org/cargo/commands/cargo-install.html) support selecting a tag and using the committed dependency lockfile.
 
-For the latest main branch, replace `--tag v0.2.0` with `--branch main`. To update an installed service: stop it, install the desired tag with `--force`, and start it again. Reinstall the service definition if the binary's installation path changes.
+For the latest main branch, replace `--tag v0.2.1` with `--branch main`. To update an installed service: stop it, install the desired tag with `--force`, and start it again. Reinstall the service definition if the binary's installation path changes.
 
 ### Download a binary
 
@@ -50,8 +50,8 @@ Linux archives require glibc 2.35 or newer. Build with Cargo on older systems. M
 For example, on an Apple Silicon Mac:
 
 ```sh
-curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.2.0/ysync-v0.2.0-aarch64-apple-darwin.tar.gz
-curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.2.0/SHA256SUMS
+curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.2.1/ysync-v0.2.0-aarch64-apple-darwin.tar.gz
+curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.2.1/SHA256SUMS
 shasum -a 256 ysync-v0.2.0-aarch64-apple-darwin.tar.gz
 # Compare the result with its matching entry in SHA256SUMS.
 tar -xzf ysync-v0.2.0-aarch64-apple-darwin.tar.gz

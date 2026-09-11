@@ -179,6 +179,43 @@ impl Wire {
         }
         Ok(serde_json::from_slice(&data)?)
     }
+    // Keep the peer alive while local disk work or a scanner-held gate is slow.
+    // Only this thread touches the encrypted wire. At most one scoped worker is
+    // active; dropping a connection cancels cooperative reads and gate waits.
+    fn preparing<T: Send>(
+        &mut self,
+        control: &crate::scanning::ScanControl,
+        mut check: impl FnMut() -> Result<()>,
+        work: impl FnOnce() -> Result<T> + Send,
+    ) -> Result<T> {
+        std::thread::scope(|scope| {
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let worker = scope.spawn(move || {
+                let _ = tx.send(work());
+            });
+            let result = (|| {
+                loop {
+                    match rx.recv_timeout(Duration::from_secs(1)) {
+                        Ok(result) => return result,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            check()?;
+                            self.send(&Message::Preparing)?;
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            bail!("receiver worker stopped unexpectedly");
+                        }
+                    }
+                }
+            })();
+            if result.is_err() {
+                control.stop();
+            }
+            worker
+                .join()
+                .map_err(|_| anyhow::anyhow!("receiver worker panicked"))?;
+            result
+        })
+    }
     fn recv_prepared(&mut self) -> Result<Message> {
         loop {
             match self.recv()? {
@@ -420,7 +457,10 @@ fn send_batch(w: &mut Wire, shared: &Shared, folder: &str, after: u64) -> Result
         entries: entries.clone(),
         upto,
     })?;
-    let want = match w.recv_prepared()? {
+    let want = match w
+        .recv_prepared()
+        .with_context(|| format!("waiting for {folder} batch {upto} payload requests"))?
+    {
         Message::Want(v) if v.len() == entries.len() => v,
         _ => bail!("expected file resume requests"),
     };
@@ -501,7 +541,10 @@ fn send_batch(w: &mut Wire, shared: &Shared, folder: &str, after: u64) -> Result
         shared.file_sent(folder, &e.path);
     }
     w.writer.flush()?;
-    match w.recv_prepared()? {
+    match w
+        .recv_prepared()
+        .with_context(|| format!("waiting for {folder} batch {upto} durable acknowledgement"))?
+    {
         Message::Ack { upto: n } if n == upto => Ok(n),
         _ => bail!("batch not acknowledged"),
     }
@@ -515,22 +558,47 @@ fn receive_batch(w: &mut Wire, shared: &Shared, expected_folder: &str) -> Result
         } if folder == expected_folder && entries.len() <= 128 => (folder, entries, upto),
         _ => bail!("invalid batch"),
     };
-    let root = root(shared, &w.peer, &folder)?;
-    let mut c = store::open(&shared.home)?;
-    let prior = store::cursor(&c, &w.peer, &folder)?;
-    if upto < prior
-        || entries.windows(2).any(|v| v[0].seq >= v[1].seq)
-        || entries.iter().any(|e| e.seq <= prior || e.seq > upto)
-    {
-        bail!("invalid change sequence");
-    }
-    let wants: Vec<bool> = entries
-        .iter()
-        .map(|e| engine::wants(&c, &root, e))
-        .collect::<Result<_>>()?;
+    let mut root = root(shared, &w.peer, &folder)?;
+    let control = Arc::new(crate::scanning::ScanControl::default());
+    root.scan_control = Some(control.clone());
+    let peer = w.peer.clone();
+    let check = |detail: &'static str| {
+        let peer = &peer;
+        let folder = &folder;
+        let mut reported = false;
+        move || -> Result<()> {
+            if shared.stopping() {
+                bail!("daemon stopping");
+            }
+            self::root(shared, peer, folder)?.check()?;
+            if !reported {
+                shared.event("preparing", Some(folder), detail);
+                reported = true;
+            }
+            Ok(())
+        }
+    };
+    let (mut c, prior, wants) = w.preparing(
+        &control,
+        check("Checking destination files and index"),
+        || {
+            let c = store::open(&shared.home)?;
+            let prior = store::cursor(&c, &peer, &folder)?;
+            if upto < prior
+                || entries.windows(2).any(|v| v[0].seq >= v[1].seq)
+                || entries.iter().any(|e| e.seq <= prior || e.seq > upto)
+            {
+                bail!("invalid change sequence");
+            }
+            let wants = entries
+                .iter()
+                .map(|e| engine::wants(&c, &root, e))
+                .collect::<Result<Vec<_>>>()?;
+            Ok((c, prior, wants))
+        },
+    )?;
     let mut partials = BTreeMap::new();
     let mut requests = Vec::with_capacity(entries.len());
-    let peer = w.peer.clone();
     for (entry, wanted) in entries.iter().zip(wants) {
         if wanted {
             let mut partial = Partial::open(&root, &peer, entry, || w.send(&Message::Preparing))?;
@@ -613,60 +681,90 @@ fn receive_batch(w: &mut Wire, shared: &Shared, expected_folder: &str) -> Result
                 .file
                 .set_permissions(std::fs::Permissions::from_mode(e.mode))?;
         }
-        let flushes: Vec<_> = partials.values().map(|p| &p.file).collect();
-        // Overlap durable file flushes with a bounded worker count. All must finish before publication.
-        std::thread::scope(|scope| -> Result<()> {
-            let workers = 8.min(flushes.len());
-            if workers == 0 {
-                return Ok(());
-            }
-            let mut handles = Vec::new();
-            for group in flushes.chunks(flushes.len().div_ceil(workers)) {
-                handles.push(scope.spawn(move || -> std::io::Result<()> {
-                    for file in group {
-                        file.sync_all()?;
+        {
+            let c = &mut c;
+            let root = &root;
+            let partials = &partials;
+            let entries = &entries;
+            let folder = &folder;
+            let peer = &peer;
+            let control = &control;
+            w.preparing(
+                control,
+                check("Waiting for scanner access or committing received files"),
+                move || {
+                    let flushes: Vec<_> = partials.values().map(|p| &p.file).collect();
+                    // Overlap durable file flushes with a bounded worker count. All must finish before publication.
+                    std::thread::scope(|scope| -> Result<()> {
+                        let workers = 8.min(flushes.len());
+                        if workers == 0 {
+                            return Ok(());
+                        }
+                        let mut handles = Vec::new();
+                        for group in flushes.chunks(flushes.len().div_ceil(workers)) {
+                            handles.push(scope.spawn(move || -> std::io::Result<()> {
+                                for file in group {
+                                    file.sync_all()?;
+                                }
+                                Ok(())
+                            }));
+                        }
+                        for handle in handles {
+                            handle
+                                .join()
+                                .map_err(|_| anyhow::anyhow!("flush worker panicked"))??;
+                        }
+                        Ok(())
+                    })?;
+                    let _guard = loop {
+                        control.checkpoint()?;
+                        match root.gate.try_lock() {
+                            Ok(guard) => break guard,
+                            Err(std::sync::TryLockError::WouldBlock) => {
+                                std::thread::sleep(Duration::from_millis(50))
+                            }
+                            Err(std::sync::TryLockError::Poisoned(_)) => {
+                                bail!("folder gate poisoned")
+                            }
+                        }
+                    };
+                    // Recheck permissions and pause/revocation after the data transfer, before any publication.
+                    let _ = self::root(shared, peer, folder)?;
+                    let tx =
+                        c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                    // Children must be removed before their deleted parents, irrespective of journal order.
+                    let mut ordered: Vec<&Entry> = entries.iter().collect();
+                    ordered.sort_by(|a, b| match (&a.kind, &b.kind) {
+                        (Kind::Deleted, Kind::Deleted) => b.path.len().cmp(&a.path.len()),
+                        (Kind::Deleted, _) => std::cmp::Ordering::Greater,
+                        (_, Kind::Deleted) => std::cmp::Ordering::Less,
+                        _ => a.path.len().cmp(&b.path.len()),
+                    });
+                    for e in ordered {
+                        control.checkpoint()?;
+                        let conflict = engine::apply(
+                            &tx,
+                            root,
+                            &shared.id,
+                            e,
+                            partials.get(&e.path).map(|p| p.name.as_str()),
+                        )?;
+                        if conflict {
+                            shared.event("conflict", Some(folder), &e.path);
+                        }
+                    }
+                    control.checkpoint()?;
+                    engine::sync_directories(root, entries)?;
+                    store::set_cursor(&tx, peer, folder, upto)?;
+                    tx.commit()?;
+                    for e in entries {
+                        if !root.excluded(&e.path) {
+                            shared.file_received(folder, &e.path);
+                        }
                     }
                     Ok(())
-                }));
-            }
-            for handle in handles {
-                handle
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("flush worker panicked"))??;
-            }
-            Ok(())
-        })?;
-        let _guard = root.gate.lock().unwrap();
-        // Recheck permissions and pause/revocation after the data transfer, before any publication.
-        let _ = self::root(shared, &w.peer, &folder)?;
-        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        // Children must be removed before their deleted parents, irrespective of journal order.
-        let mut ordered: Vec<&Entry> = entries.iter().collect();
-        ordered.sort_by(|a, b| match (&a.kind, &b.kind) {
-            (Kind::Deleted, Kind::Deleted) => b.path.len().cmp(&a.path.len()),
-            (Kind::Deleted, _) => std::cmp::Ordering::Greater,
-            (_, Kind::Deleted) => std::cmp::Ordering::Less,
-            _ => a.path.len().cmp(&b.path.len()),
-        });
-        for e in ordered {
-            let conflict = engine::apply(
-                &tx,
-                &root,
-                &shared.id,
-                e,
-                partials.get(&e.path).map(|p| p.name.as_str()),
+                },
             )?;
-            if conflict {
-                shared.event("conflict", Some(&folder), &e.path);
-            }
-        }
-        engine::sync_directories(&root, &entries)?;
-        store::set_cursor(&tx, &w.peer, &folder, upto)?;
-        tx.commit()?;
-        for e in &entries {
-            if !root.excluded(&e.path) {
-                shared.file_received(&folder, &e.path);
-            }
         }
         w.send(&Message::Ack { upto })?;
         Ok(())
@@ -810,6 +908,165 @@ mod tests {
         );
         t.join().unwrap();
     }
+    #[derive(Clone, Copy, PartialEq)]
+    enum GateAction {
+        Release,
+        Pause,
+        Disconnect,
+        StoreBusy,
+    }
+
+    #[test]
+    fn receiver_ack_survives_scanner_gate_delay() {
+        delayed_receiver(GateAction::Release);
+    }
+    #[test]
+    fn paused_receiver_cancels_while_scanner_gate_is_held() {
+        delayed_receiver(GateAction::Pause);
+    }
+    #[test]
+    fn disconnected_receiver_cancels_while_scanner_gate_is_held() {
+        delayed_receiver(GateAction::Disconnect);
+    }
+
+    #[test]
+    fn receiver_preflight_survives_database_writer_delay() {
+        delayed_receiver(GateAction::StoreBusy);
+    }
+
+    fn delayed_receiver(action: GateAction) {
+        let sender_home = tempfile::tempdir().unwrap();
+        let receiver_home = tempfile::tempdir().unwrap();
+        let sender_files = tempfile::tempdir().unwrap();
+        let receiver_files = tempfile::tempdir().unwrap();
+        let sender_id = config::initialize(sender_home.path(), None, None).unwrap();
+        let receiver_id = config::initialize(receiver_home.path(), None, None).unwrap();
+        for (home, files, peer) in [
+            (sender_home.path(), sender_files.path(), &receiver_id),
+            (receiver_home.path(), receiver_files.path(), &sender_id),
+        ] {
+            engine::add_folder(home, "code", files, true).unwrap();
+            config::edit(home, |c| {
+                c.peers.push(config::Peer {
+                    id: peer.clone(),
+                    name: "peer".into(),
+                    address: None,
+                    approved: true,
+                    folders: vec!["code".into()],
+                });
+                Ok(())
+            })
+            .unwrap();
+        }
+        let sender = Shared::new(sender_home.path(), sender_id.clone(), String::new());
+        let receiver = Shared::new(receiver_home.path(), receiver_id.clone(), String::new());
+        sender.mark_ready_for_test("code");
+        receiver.mark_ready_for_test("code");
+        std::fs::write(sender_files.path().join("probe"), b"new file").unwrap();
+        let source = root(&sender, &receiver_id, "code").unwrap();
+        engine::scan(&source, sender_home.path(), &sender_id, None, |_| {}).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let gate = receiver.gate("code");
+        // Emulate the scanner holding its folder gate during expensive hashing.
+        let guard = gate.lock().unwrap();
+        let receiver_db = store::open(receiver_home.path()).unwrap();
+        if action == GateAction::StoreBusy {
+            receiver_db.execute_batch("BEGIN IMMEDIATE").unwrap();
+        }
+        let (socket_tx, socket_rx) = std::sync::mpsc::sync_channel(1);
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+        let result = std::thread::scope(|scope| {
+            let receiver_task = scope.spawn(|| {
+                let mut wire = Wire::handshake(
+                    listener.accept().unwrap().0,
+                    receiver_home.path(),
+                    None,
+                    false,
+                )
+                .unwrap();
+                let result = receive_batch(&mut wire, &receiver, "code");
+                done_tx.send(()).unwrap();
+                result
+            });
+            let sender_task = scope.spawn(|| {
+                let mut wire = Wire::handshake(
+                    TcpStream::connect(addr).unwrap(),
+                    sender_home.path(),
+                    Some(&receiver_id),
+                    true,
+                )
+                .unwrap();
+                wire.reader
+                    .get_ref()
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                socket_tx
+                    .send(wire.reader.get_ref().try_clone().unwrap())
+                    .unwrap();
+                send_batch(&mut wire, &sender, "code", 0)
+            });
+            let socket = socket_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            std::thread::sleep(Duration::from_secs(4));
+            assert!(!receiver_files.path().join("probe").exists());
+            assert_eq!(store::cursor(&receiver_db, &sender_id, "code").unwrap(), 0);
+            match action {
+                GateAction::Release => {}
+                GateAction::StoreBusy => receiver_db.execute_batch("COMMIT").unwrap(),
+                GateAction::Pause => config::edit(receiver_home.path(), |c| {
+                    c.folders[0].paused = true;
+                    Ok(())
+                })
+                .unwrap(),
+                GateAction::Disconnect => socket.shutdown(std::net::Shutdown::Both).unwrap(),
+            }
+            let cancelled = matches!(action, GateAction::Release | GateAction::StoreBusy)
+                || done_rx.recv_timeout(Duration::from_secs(6)).is_ok();
+            drop(guard);
+            let sent = sender_task.join().unwrap();
+            let received = receiver_task.join().unwrap();
+            (sent, received, cancelled)
+        });
+        if matches!(action, GateAction::Pause | GateAction::Disconnect) {
+            assert!(
+                result.2,
+                "cancelled receiver remained blocked on scanner gate"
+            );
+            assert!(result.0.is_err());
+            assert!(result.1.is_err());
+            assert!(!receiver_files.path().join("probe").exists());
+            assert_eq!(
+                store::cursor(
+                    &store::open(receiver_home.path()).unwrap(),
+                    &sender_id,
+                    "code"
+                )
+                .unwrap(),
+                0
+            );
+            return;
+        }
+        assert!(
+            result.0.is_ok(),
+            "sender timed out before durable acknowledgement: {:?}",
+            result.0
+        );
+        result.1.unwrap();
+        assert_eq!(
+            std::fs::read(receiver_files.path().join("probe")).unwrap(),
+            b"new file"
+        );
+        assert_eq!(
+            store::cursor(
+                &store::open(receiver_home.path()).unwrap(),
+                &sender_id,
+                "code"
+            )
+            .unwrap(),
+            result.0.unwrap()
+        );
+    }
+
     #[test]
     fn rejects_oversized_wire_frames() {
         let mut bytes = &[0u8, 1, 0, 0][..];

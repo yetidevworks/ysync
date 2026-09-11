@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1
+
+- Keep encrypted progress messages flowing during receiver index/content checks, durability flushes, scanner-lock waits, and publication, so slow local work does not trip the peer's network read timeout.
+- Cancel cooperative receiver reads and lock waits when the connection fails, the folder is paused/revoked, or the daemon stops. Acknowledgements still follow durable publication and index commit.
+- Report slow receiver work in activity events and include batch/stage context in request and acknowledgement timeout errors.
+- Add isolated regressions for delayed scanner access, database contention, pause, and disconnect. Wire protocol 4 and the 0.2.0 conflict protections are unchanged.
+
 ## 0.2.0
 
 - Replace automatic hash-based conflict winners with durable pending conflicts. Independent content, permission/type differences, and edit/delete conflicts never automatically replace the working version.

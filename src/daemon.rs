@@ -117,6 +117,28 @@ pub struct Shared {
     scan_controls: Mutex<HashMap<String, Arc<ScanControl>>>,
 }
 impl Shared {
+    pub(crate) fn new(home: &Path, id: String, listen: String) -> Self {
+        Self {
+            home: home.to_owned(),
+            id: id.clone(),
+            stop: AtomicBool::new(false),
+            sent: AtomicU64::new(0),
+            received: AtomicU64::new(0),
+            status: Mutex::new(Status {
+                pid: std::process::id(),
+                started: now(),
+                device: id.clone(),
+                listen,
+                watch_limits: crate::capacity::limits(),
+                ..Default::default()
+            }),
+            gates: Mutex::new(HashMap::new()),
+            peer_gates: Mutex::new(HashMap::new()),
+            ready: Mutex::new(HashSet::new()),
+            scan_controls: Mutex::new(HashMap::new()),
+        }
+    }
+
     fn update_scan_controls(&self, cfg: &config::Config, thermal: &ThermalStatus) {
         let mut controls = self.scan_controls.lock().unwrap();
         for f in &cfg.folders {
@@ -149,6 +171,10 @@ impl Shared {
             .entry(id.into())
             .or_default()
             .clone()
+    }
+    #[cfg(test)]
+    pub(crate) fn mark_ready_for_test(&self, id: &str) {
+        self.ready.lock().unwrap().insert(id.into());
     }
     pub fn ready(&self, id: &str) -> bool {
         self.ready.lock().unwrap().contains(id)
@@ -680,25 +706,7 @@ pub fn serve(home: &Path) -> Result<()> {
     let listener =
         TcpListener::bind(&cfg.listen).with_context(|| format!("listening on {}", cfg.listen))?;
     listener.set_nonblocking(true)?;
-    let shared = Arc::new(Shared {
-        home: home.to_owned(),
-        id: id.clone(),
-        stop: AtomicBool::new(false),
-        sent: AtomicU64::new(0),
-        received: AtomicU64::new(0),
-        status: Mutex::new(Status {
-            pid: std::process::id(),
-            started: now(),
-            device: id.clone(),
-            listen: cfg.listen.clone(),
-            watch_limits: crate::capacity::limits(),
-            ..Default::default()
-        }),
-        gates: Mutex::new(HashMap::new()),
-        peer_gates: Mutex::new(HashMap::new()),
-        ready: Mutex::new(HashSet::new()),
-        scan_controls: Mutex::new(HashMap::new()),
-    });
+    let shared = Arc::new(Shared::new(home, id.clone(), cfg.listen.clone()));
     let stop = shared.clone();
     ctrlc::set_handler(move || {
         stop.stop.store(true, Ordering::Relaxed);

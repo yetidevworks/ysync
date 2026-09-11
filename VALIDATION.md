@@ -192,3 +192,12 @@ The macOS suite passes 43 unit tests and 11 integration tests with native watche
 A separate process probe connected the installed 0.1.1 binary to the new 0.2.0 binary using isolated roots. Wire protocol 3 was refused by protocol 4 before any entries transferred, and both pre-existing files remained unchanged. Both real Projects roots remained paused, with their services stopped, throughout these checks. This does not retroactively resolve earlier conflicts or demonstrate completion of the real-folder sync.
 
 Automatic replacement now requires causal version history; independent differences require an explicit choice. Destination checks catch changes before publication, and new regular files use atomic creation without replacement. These checks do not provide application-consistent snapshots or eliminate every race with applications writing through existing open file handles. Earlier conflict archives remain available for separate review.
+
+
+## 0.2.1 receiver timeout reproduction
+
+A monitored 0.2.0 Projects trial moved 76,072,127 payload bytes from Mac to Linux and processed 47,744 received index entries on each side before transfers stalled. Scanning continued, and connection errors included macOS `Resource temporarily unavailable`, resets, and Linux `device already connected`. No watcher overflows were recorded. Both services were stopped and Projects paused after approximately three minutes. The highest sampled Linux CPU temperature was 77.125 C; this was not continuous temperature sampling. Pending conflicts were retained (24 Mac, 8 Linux), and the original `test.text` had not reached Linux.
+
+An isolated encrypted-transfer regression holds the receiver's folder gate for four seconds with a two-second peer read timeout. The old receiver fails with the same macOS error before receiving its durable acknowledgement. The patched receiver succeeds without publishing a file or advancing its cursor while the gate is held. Further regressions hold an SQLite write transaction during preflight and verify that folder pause and peer disconnect cancel a receiver still waiting for the gate, leaving its destination and cursor untouched.
+
+The local macOS suite passes 47 unit and 11 integration tests with native watchers required. This reproduces and fixes a timeout mechanism consistent with the live failure; a further monitored large-tree trial is needed to assess remaining bottlenecks. The fix does not reduce the underlying scan/hash workload or automatically resolve platform-specific symlink conflicts.

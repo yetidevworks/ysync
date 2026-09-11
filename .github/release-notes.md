@@ -1,16 +1,9 @@
-Safety change: conflicting incoming content no longer automatically replaces a working file. Independently changed or initially different files remain in place on each device; incoming versions are preserved as pending conflicts. Hash ordering and timestamps do not select a winner.
+Fix receiver timeouts during slow initial scans. Destination checks, filesystem flushes, scanner-lock waits, and publication now send encrypted progress messages while the peer waits. Previously, these silent waits could exceed the 30-second transport timeout and leave reconnects encountering an unfinished session.
 
-Known older causal versions are ignored. Ordinary later edits to a shared version still synchronize. Local content is checked before publication, and creation of a new file cannot overwrite a path created during the final publication window.
+Pause, revocation, daemon stop, and connection failure cancel cooperative receiver reads and lock waits. The peer is acknowledged only after files and the sync cursor are committed. The 0.2.0 conflict protections remain intact; independent versions still require explicit resolution.
 
-New commands:
+Four new isolated regressions cover scanner-lock delay, database-writer contention, pause, and disconnect. Slow receiver activity is visible in events, and timeout errors identify the batch and transfer stage.
 
-```sh
-ysync conflict list
-ysync conflict list --json
-# Stop the daemon first; review/merge the working file before choosing it.
-ysync conflict resolve projects FULL_CONFLICT_ID --keep-local
-```
+Upgrade with `brew update && brew upgrade ysync`, or `cargo install --git https://github.com/yetidevworks/ysync.git --tag v0.2.1 --locked ysync`. Stop services before upgrading. Both peers should be upgraded to receive the fix in both directions; wire protocol remains 4. Configuration, identity, indexes, and pending conflicts are retained.
 
-**Upgrade both devices.** Protocol 4 refuses protocol 3 peers (0.1.x) before exchanging file batches. Stop services before `brew update && brew upgrade ysync`. Pause settings, identities and indexes are retained; the pending-conflicts table is added automatically. Legacy conflict archives remain on disk for separate review; this release does not undo earlier conflict choices.
-
-This remains experimental. Existing-file conflict review, initial backlog, inaccessible paths, and application-consistent snapshots are still separate concerns. Native archives cover ARM64/x86-64 macOS and Linux; Linux requires glibc 2.35 or newer. Checksums are included.
+This remains experimental. The interrupted real Projects trial requires another monitored run; this release does not resolve existing conflicts, exclusions, inaccessible files, or initial backlog.
