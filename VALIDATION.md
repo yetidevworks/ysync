@@ -201,3 +201,12 @@ A monitored 0.2.0 Projects trial moved 76,072,127 payload bytes from Mac to Linu
 An isolated encrypted-transfer regression holds the receiver's folder gate for four seconds with a two-second peer read timeout. The old receiver fails with the same macOS error before receiving its durable acknowledgement. The patched receiver succeeds without publishing a file or advancing its cursor while the gate is held. Further regressions hold an SQLite write transaction during preflight and verify that folder pause and peer disconnect cancel a receiver still waiting for the gate, leaving its destination and cursor untouched.
 
 The local macOS suite passes 47 unit and 11 integration tests with native watchers required. This reproduces and fixes a timeout mechanism consistent with the live failure; a further monitored large-tree trial is needed to assess remaining bottlenecks. The fix does not reduce the underlying scan/hash workload or automatically resolve platform-specific symlink conflicts.
+
+
+## 0.2.2 canonical Unicode paths
+
+The resumed 0.2.1 real-folder trial passed its earlier timeout position. In `yetidevworks`, test files arrived in both directions, the user's moved `test.text` matched its original SHA256 on Linux, and follow-up edits were observed in both directions after approximately 1.2 seconds including SSH verification. Initial scans finished with native watchers and no overflows. This is a single live observation, not a controlled latency benchmark.
+
+`trilbymedia` subsequently stopped on two representations of an accented filename: composed versus decomposed Unicode. Both spellings were confirmed to resolve to the same inode on the Mac. Its receiver treated the spelling difference as a path-key collision. The fix resolves canonical aliases, including parent directories, to their indexed local spelling before payload negotiation and publication. Case-only differences and physically distinct aliases remain errors.
+
+The Mac suite passes 49 unit and 12 integration tests. The new end-to-end test uses different canonical encodings for each device's directory, verifies bidirectional edits and a new child, and confirms that local directory names remain unchanged. An additional Linux-only test rejects two physically distinct files with canonical aliases. Large-folder reconciliation remains in progress; these tests do not establish complete live-folder convergence.

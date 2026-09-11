@@ -578,7 +578,7 @@ fn receive_batch(w: &mut Wire, shared: &Shared, expected_folder: &str) -> Result
             Ok(())
         }
     };
-    let (mut c, prior, wants) = w.preparing(
+    let (mut c, prior, wants, entries) = w.preparing(
         &control,
         check("Checking destination files and index"),
         || {
@@ -590,11 +590,12 @@ fn receive_batch(w: &mut Wire, shared: &Shared, expected_folder: &str) -> Result
             {
                 bail!("invalid change sequence");
             }
+            let entries = engine::resolve_incoming_paths(&c, &root, &entries)?;
             let wants = entries
                 .iter()
                 .map(|e| engine::wants(&c, &root, e))
                 .collect::<Result<Vec<_>>>()?;
-            Ok((c, prior, wants))
+            Ok((c, prior, wants, entries))
         },
     )?;
     let mut partials = BTreeMap::new();

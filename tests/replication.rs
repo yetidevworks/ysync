@@ -828,3 +828,62 @@ fn unsupported_thermal_sensor_pauses_and_live_disable_resumes() {
         })
     });
 }
+
+#[test]
+fn unicode_equivalent_paths_replicate_without_renaming_local_files() {
+    let mut a = Device::new("unicode-a");
+    let mut b = Device::new("unicode-b");
+    let decomposed = "cafe\u{301}";
+    let composed = "caf\u{e9}";
+    let ap = format!("{decomposed}/file.txt");
+    let bp = format!("{composed}/file.txt");
+    a.write(&ap, b"base");
+    b.write(&bp, b"base");
+    a.start();
+    b.start();
+    wait("independent Unicode scans", &a, &b, || {
+        [&a, &b].iter().all(|d| {
+            ysync::daemon::read_status(d.state.path())
+                .is_ok_and(|s| s.folders.get("code").is_some_and(|f| f.phase == "watching"))
+        })
+    });
+    a.dial(&b);
+    b.dial(&a);
+    let entry = |d: &Device| -> Option<ysync::model::Entry> {
+        let c = ysync::store::open(d.state.path()).ok()?;
+        let data: String = c
+            .query_row(
+                "select data from entries where folder='code' and path_key=?",
+                [ysync::model::path_key(&ap)],
+                |r| r.get(0),
+            )
+            .ok()?;
+        serde_json::from_str(&data).ok()
+    };
+    wait("canonical Unicode baseline", &a, &b, || {
+        match (entry(&a), entry(&b)) {
+            (Some(x), Some(y)) => x.clock == y.clock,
+            _ => false,
+        }
+    });
+    a.write(&ap, b"edit from a");
+    wait("Unicode edit a to b", &a, &b, || {
+        equals(&b, &bp, b"edit from a")
+    });
+    b.write(&bp, b"edit from b");
+    wait("Unicode edit b to a", &a, &b, || {
+        equals(&a, &ap, b"edit from b")
+    });
+    b.write(&format!("{composed}/new.txt"), b"new child");
+    wait("new child in Unicode parent", &a, &b, || {
+        equals(&a, &format!("{decomposed}/new.txt"), b"new child")
+    });
+    for (d, spelling) in [(&a, decomposed), (&b, composed)] {
+        let names: Vec<_> = fs::read_dir(d.files.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n != ".ysync")
+            .collect();
+        assert_eq!(names, vec![spelling.to_owned()]);
+    }
+}

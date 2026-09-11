@@ -512,6 +512,107 @@ fn scan_impl(
     Ok(count)
 }
 
+/// Preserve the local spelling of canonically equivalent Unicode paths.
+/// Case-only aliases and distinct physical files remain collisions.
+pub fn resolve_incoming_paths(
+    c: &Connection,
+    root: &Root,
+    entries: &[Entry],
+) -> Result<Vec<Entry>> {
+    use unicode_normalization::UnicodeNormalization;
+    let mut prefixes = std::collections::BTreeSet::new();
+    let mut path_keys = std::collections::HashSet::new();
+    let mut prefix_bytes = 0usize;
+    for entry in entries {
+        entry.validate()?;
+        if root.excluded(&entry.path) {
+            continue;
+        }
+        if !path_keys.insert(model::path_key(&entry.path)) {
+            bail!("batch contains colliding paths");
+        }
+        for prefix in Path::new(&entry.path)
+            .ancestors()
+            .filter_map(Path::to_str)
+            .filter(|s| !s.is_empty())
+        {
+            let key = model::path_key(prefix);
+            if !prefixes.contains(&key) {
+                prefix_bytes += key.len();
+                if prefix_bytes > 4 * 1024 * 1024 {
+                    bail!("path prefix metadata too large");
+                }
+                prefixes.insert(key);
+            }
+        }
+    }
+    if prefixes.is_empty() {
+        return Ok(entries.to_vec());
+    }
+    let keys: Vec<_> = prefixes.iter().collect();
+    let mut query = c.prepare_cached("SELECT path_key,path FROM entries WHERE folder=?1 AND path_key IN (SELECT value FROM json_each(?2))")?;
+    let aliases = query
+        .query_map(
+            rusqlite::params![root.folder.id, serde_json::to_string(&keys)?],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )?
+        .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
+    let metadata = |path: &str| -> Result<Option<Metadata>> {
+        let result = root
+            .parents(path, false)
+            .and_then(|()| Ok(root.dir.symlink_metadata(path)?));
+        match result {
+            Ok(m) => Ok(Some(m)),
+            Err(e)
+                if e.downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    };
+    let mut checked = std::collections::HashSet::new();
+    entries
+        .iter()
+        .map(|entry| {
+            let mut resolved = entry.clone();
+            if root.excluded(&entry.path) {
+                return Ok(resolved);
+            }
+            for prefix in Path::new(&entry.path)
+                .ancestors()
+                .filter_map(Path::to_str)
+                .filter(|s| !s.is_empty())
+            {
+                let Some(local) = aliases.get(&model::path_key(prefix)) else {
+                    continue;
+                };
+                if local == prefix {
+                    break;
+                }
+                if !local.nfc().eq(prefix.nfc()) {
+                    bail!("case collision: {local} and {prefix}");
+                }
+                if checked.insert((local.clone(), prefix.to_owned())) {
+                    match (metadata(local)?, metadata(prefix)?) {
+                        (Some(a), Some(b)) if a.dev() != b.dev() || a.ino() != b.ino() => bail!(
+                            "distinct files have canonically equivalent names: {local} and {prefix}"
+                        ),
+                        (None, Some(_)) => bail!(
+                            "local Unicode spelling changed; rescan required: {local} and {prefix}"
+                        ),
+                        _ => {}
+                    }
+                }
+                resolved.path = format!("{local}{}", &entry.path[prefix.len()..]);
+                break;
+            }
+            Ok(resolved)
+        })
+        .collect()
+}
+
 pub fn wants(c: &Connection, root: &Root, remote: &Entry) -> Result<bool> {
     remote.validate()?;
     if root.excluded(&remote.path) {
@@ -1064,6 +1165,112 @@ mod tests {
             .unwrap();
         file.sync_all().unwrap();
         (remote, name)
+    }
+
+    #[test]
+    fn unicode_equivalent_names_preserve_local_spelling_and_conflicts() {
+        use unicode_normalization::UnicodeNormalization;
+        let (state, files, root, id) = fixture();
+        let local_path = "cafe\u{301}/uzbekista\u{301}n.svg";
+        std::fs::create_dir(files.path().join("cafe\u{301}")).unwrap();
+        std::fs::write(files.path().join(local_path), b"working").unwrap();
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        let c = store::open(state.path()).unwrap();
+        let old = store::get(&c, "test", local_path).unwrap().unwrap();
+        let mut incoming = old.clone();
+        incoming.path = local_path.nfc().collect();
+        incoming.clock = [("a".repeat(64), 1)].into();
+        let resolved = resolve_incoming_paths(&c, &root, &[incoming.clone()])
+            .unwrap()
+            .remove(0);
+        assert_eq!(resolved.path, local_path);
+        assert!(!wants(&c, &root, &resolved).unwrap());
+        assert!(!apply(&c, &root, &id, &resolved, None).unwrap());
+        let merged = store::get(&c, "test", local_path).unwrap().unwrap();
+        assert_eq!(merged.clock.len(), 2);
+        let (mut remote, temp) = staged_remote(&root, &merged, b"later edit", false);
+        remote.path = incoming.path.clone();
+        remote.clock.insert("a".repeat(64), 2);
+        let remote = resolve_incoming_paths(&c, &root, &[remote])
+            .unwrap()
+            .remove(0);
+        assert!(!apply(&c, &root, &id, &remote, Some(&temp)).unwrap());
+        assert_eq!(
+            std::fs::read(files.path().join(local_path)).unwrap(),
+            b"later edit"
+        );
+        let (mut remote, temp) = staged_remote(&root, &merged, b"independent branch", true);
+        remote.path = incoming.path;
+        remote.clock = [("b".repeat(64), 1)].into();
+        let remote = resolve_incoming_paths(&c, &root, &[remote])
+            .unwrap()
+            .remove(0);
+        assert!(apply(&c, &root, &id, &remote, Some(&temp)).unwrap());
+        assert_eq!(
+            std::fs::read(files.path().join(local_path)).unwrap(),
+            b"later edit"
+        );
+        assert_eq!(
+            crate::conflicts::list(&c).unwrap()[0].incoming.path,
+            local_path
+        );
+        let mut child = old.clone();
+        child.path = "caf\u{e9}/new.txt".into();
+        assert_eq!(
+            resolve_incoming_paths(&c, &root, &[child]).unwrap()[0].path,
+            "cafe\u{301}/new.txt"
+        );
+        let mut case = old.clone();
+        case.path = "Cafe\u{301}/uzbekista\u{301}n.svg".into();
+        assert!(resolve_incoming_paths(&c, &root, &[case]).is_err());
+    }
+
+    #[test]
+    fn incoming_alias_checks_keep_ignored_batch_positions_and_reject_duplicates() {
+        let (state, files, root, id) = fixture();
+        std::fs::write(files.path().join("file"), b"data").unwrap();
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        let c = store::open(state.path()).unwrap();
+        let mut entry = store::get(&c, "test", "file").unwrap().unwrap();
+        entry.path = "cafe\u{301}".into();
+        let mut other = entry.clone();
+        other.path = "caf\u{e9}".into();
+        assert!(resolve_incoming_paths(&c, &root, &[entry, other]).is_err());
+        let mut ignored_root = root;
+        ignored_root.folder.ignores = vec!["ignored".into()];
+        let ignored_root = Root::open(ignored_root.folder, ignored_root.gate).unwrap();
+        let mut ignored = store::get(&c, "test", "file").unwrap().unwrap();
+        ignored.path = "ignored/file".into();
+        let resolved = resolve_incoming_paths(&c, &ignored_root, &[ignored.clone()]).unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].path, ignored.path);
+        assert!(!wants(&c, &ignored_root, &resolved[0]).unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn distinct_unicode_files_are_not_merged() {
+        let (state, files, root, id) = fixture();
+        std::fs::write(files.path().join("cafe\u{301}"), b"first").unwrap();
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        let c = store::open(state.path()).unwrap();
+        let mut remote = store::get(&c, "test", "cafe\u{301}").unwrap().unwrap();
+        remote.path = "caf\u{e9}".into();
+        std::fs::write(files.path().join(&remote.path), b"second").unwrap();
+        assert!(
+            resolve_incoming_paths(&c, &root, &[remote])
+                .unwrap_err()
+                .to_string()
+                .contains("distinct files")
+        );
+        assert_eq!(
+            std::fs::read(files.path().join("cafe\u{301}")).unwrap(),
+            b"first"
+        );
+        assert_eq!(
+            std::fs::read(files.path().join("caf\u{e9}")).unwrap(),
+            b"second"
+        );
     }
 
     #[test]

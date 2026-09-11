@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.2
+
+- Match canonically equivalent Unicode filenames and parent directories to their existing local spelling before receive negotiation, publication, and durability checks. This fixes macOS/Linux composed-versus-decomposed filename stalls without renaming working files.
+- Keep case-only collisions, duplicate incoming path keys, and distinct physical Unicode aliases rejected; retain normal conflict preservation. Bound the prefix lookup metadata and preserve request positions for ignored entries.
+- Add bidirectional Unicode filename/parent tests, conflict-preservation tests, and a Linux regression for distinct canonical aliases. Wire protocol remains 4; upgrade both peers for matching behavior in both directions.
+
 ## 0.2.1
 
 - Keep encrypted progress messages flowing during receiver index/content checks, durability flushes, scanner-lock waits, and publication, so slow local work does not trip the peer's network read timeout.

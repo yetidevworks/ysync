@@ -1,9 +1,9 @@
-Fix receiver timeouts during slow initial scans. Destination checks, filesystem flushes, scanner-lock waits, and publication now send encrypted progress messages while the peer waits. Previously, these silent waits could exceed the 30-second transport timeout and leave reconnects encountering an unfinished session.
+Fix a macOS/Linux synchronization stall caused by canonically equivalent Unicode filenames (for example, an accented letter encoded as one character versus a base letter plus a combining accent).
 
-Pause, revocation, daemon stop, and connection failure cancel cooperative receiver reads and lock waits. The peer is acknowledged only after files and the sync cursor are committed. The 0.2.0 conflict protections remain intact; independent versions still require explicit resolution.
+Receivers now use the existing local filename and parent-directory spelling for equivalent names. Working files are not renamed. Content conflicts remain pending for explicit review. Case-only collisions, duplicate batch path keys, and distinct physical files with equivalent Unicode names are still rejected.
 
-Four new isolated regressions cover scanner-lock delay, database-writer contention, pause, and disconnect. Slow receiver activity is visible in events, and timeout errors identify the batch and transfer stage.
+Regression tests cover equivalent existing files, later edits in both directions, new children under differently encoded directory names, conflict preservation, ignored entries, and distinct Linux aliases. The 0.2.1 progress/cancellation fix is retained.
 
-Upgrade with `brew update && brew upgrade ysync`, or `cargo install --git https://github.com/yetidevworks/ysync.git --tag v0.2.1 --locked ysync`. Stop services before upgrading. Both peers should be upgraded to receive the fix in both directions; wire protocol remains 4. Configuration, identity, indexes, and pending conflicts are retained.
+Upgrade both peers with `brew update && brew upgrade ysync`, or install with `cargo install --git https://github.com/yetidevworks/ysync.git --tag v0.2.2 --locked ysync`. Stop services before upgrading. Wire protocol remains 4; identities, configuration, index history and pending conflicts are retained.
 
-This remains experimental. The interrupted real Projects trial requires another monitored run; this release does not resolve existing conflicts, exclusions, inaccessible files, or initial backlog.
+Experimental release. The larger live-folder reconciliation is still being evaluated; existing content conflicts require review.
