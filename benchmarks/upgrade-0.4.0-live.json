@@ -1,0 +1,176 @@
+{
+  "date": "2026-09-12",
+  "version": "0.4.0",
+  "release": "https://github.com/yetidevworks/ysync/releases/tag/v0.4.0",
+  "source_commit": "65d098e93353fb29db0f229351e73bae55ef9df6",
+  "ci_run": 34703024463,
+  "release_run": 34703024669,
+  "installed_via": "Homebrew on macOS ARM64 and Linux x86_64; formula tests passed on both",
+  "config_change": "grav, trilbymedia, yetidevworks: Mac send-only; Linux receive-only; existing defaults materialized without behavior change",
+  "backups": "Configuration, stopped SQLite snapshots and previous binaries retained locally on both machines",
+  "live_probes": {
+    "token": "ysync-040-check-123bdf729723",
+    "version": "0.4.0",
+    "checks": [
+      {
+        "name": "grav Mac -> Linux",
+        "seconds": 0.976
+      },
+      {
+        "name": "grav receiver edit indexed",
+        "seconds": 0.149
+      },
+      {
+        "name": "grav subsequent source edit",
+        "seconds": 0.567
+      },
+      {
+        "name": "grav receiver changes blocked upstream",
+        "passed": true
+      },
+      {
+        "name": "trilbymedia Mac -> Linux",
+        "seconds": 0.572
+      },
+      {
+        "name": "trilbymedia receiver edit indexed",
+        "seconds": 0.155
+      },
+      {
+        "name": "trilbymedia subsequent source edit",
+        "seconds": 0.583
+      },
+      {
+        "name": "trilbymedia receiver changes blocked upstream",
+        "passed": true
+      },
+      {
+        "name": "yetidevworks Mac -> Linux",
+        "seconds": 0.58
+      },
+      {
+        "name": "yetidevworks receiver edit indexed",
+        "seconds": 0.159
+      },
+      {
+        "name": "yetidevworks subsequent source edit",
+        "seconds": 0.576
+      },
+      {
+        "name": "yetidevworks receiver changes blocked upstream",
+        "passed": true
+      },
+      {
+        "name": "4 MiB bulk hash",
+        "seconds": 0.55
+      },
+      {
+        "name": "4 KiB edit hash",
+        "seconds": 0.585
+      },
+      {
+        "name": "rename arrival and old path removal",
+        "seconds": 0.731
+      },
+      {
+        "name": "test directories deleted on Linux",
+        "seconds": 0.568
+      }
+    ],
+    "removed_test_directories": true
+  },
+  "peak_sampled_linux_startup_cpu_c": 66.25,
+  "final_health": {
+    "mac": {
+      "daemon_version": "0.4.0",
+      "folders": {
+        "grav": {
+          "mode": "send-only",
+          "phase": "watching",
+          "pending_conflicts": 0,
+          "error": null,
+          "watcher": "native",
+          "full_scans": 1,
+          "scoped_scans": 15,
+          "hashed_files": 20,
+          "hashed_bytes": 635493,
+          "queued_paths": 0
+        },
+        "trilbymedia": {
+          "mode": "send-only",
+          "phase": "watching",
+          "pending_conflicts": 0,
+          "error": null,
+          "watcher": "native",
+          "full_scans": 1,
+          "scoped_scans": 12,
+          "hashed_files": 38,
+          "hashed_bytes": 37997944,
+          "queued_paths": 0
+        },
+        "yetidevworks": {
+          "mode": "send-only",
+          "phase": "watching",
+          "pending_conflicts": 0,
+          "error": null,
+          "watcher": "native",
+          "full_scans": 1,
+          "scoped_scans": 5,
+          "hashed_files": 4,
+          "hashed_bytes": 8388710,
+          "queued_paths": 0
+        }
+      },
+      "connected": true,
+      "outbound_state": "all indexed changes delivered"
+    },
+    "linux": {
+      "daemon_version": "0.4.0",
+      "folders": {
+        "grav": {
+          "mode": "receive-only",
+          "phase": "watching",
+          "pending_conflicts": 0,
+          "error": null,
+          "watcher": "native",
+          "full_scans": 1,
+          "scoped_scans": 17,
+          "hashed_files": 1,
+          "hashed_bytes": 47,
+          "queued_paths": 0
+        },
+        "trilbymedia": {
+          "mode": "receive-only",
+          "phase": "watching",
+          "pending_conflicts": 0,
+          "error": null,
+          "watcher": "native",
+          "full_scans": 1,
+          "scoped_scans": 14,
+          "hashed_files": 1,
+          "hashed_bytes": 54,
+          "queued_paths": 0
+        },
+        "yetidevworks": {
+          "mode": "receive-only",
+          "phase": "watching",
+          "pending_conflicts": 0,
+          "error": null,
+          "watcher": "native",
+          "full_scans": 1,
+          "scoped_scans": 7,
+          "hashed_files": 1,
+          "hashed_bytes": 55,
+          "queued_paths": 0
+        }
+      },
+      "connected": true,
+      "outbound_state": "sending disabled by receive-only policy"
+    }
+  },
+  "limitations": [
+    "Small live probes include polling/SSH overhead; not a throughput benchmark",
+    "No forced mirror behavior; receiver local edits remain protected",
+    "No reboot or long-duration stability claim"
+  ]
+}
