@@ -26,6 +26,14 @@ pub struct Peer {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub retention: crate::retention::Policy,
+    #[serde(default = "default_transfer_lanes")]
+    pub transfer_lanes: u8,
+    #[serde(default = "default_cache_mib")]
+    pub send_cache_mib: u16,
+    #[serde(default = "default_cache_mib")]
+    pub chunk_cache_mib: u16,
     pub name: String,
     pub listen: String,
     pub rescan_secs: u64,
@@ -39,6 +47,10 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            retention: Default::default(),
+            transfer_lanes: default_transfer_lanes(),
+            send_cache_mib: default_cache_mib(),
+            chunk_cache_mib: default_cache_mib(),
             name: std::env::var("HOSTNAME").unwrap_or_else(|_| "ysync-device".into()),
             listen: "0.0.0.0:39280".into(),
             rescan_secs: 3600,
@@ -48,6 +60,12 @@ impl Default for Config {
             peers: vec![],
         }
     }
+}
+pub fn default_transfer_lanes() -> u8 {
+    3
+}
+pub fn default_cache_mib() -> u16 {
+    64
 }
 pub fn default_workers() -> usize {
     std::thread::available_parallelism()
@@ -108,6 +126,9 @@ pub fn load(home: &Path) -> Result<Config> {
     let c: Config = serde_json::from_slice(
         &fs::read(home.join("config.json")).context("run ysync init first")?,
     )?;
+    if !(1..=8).contains(&c.transfer_lanes) || c.send_cache_mib > 1024 || c.chunk_cache_mib > 1024 {
+        bail!("transfer_lanes must be 1–8 and cache sizes at most 1024 MiB");
+    }
     if c.scan_max_temp_c.is_some_and(|t| !(40..=95).contains(&t)) {
         bail!("scan_max_temp_c must be between 40 and 95");
     }

@@ -99,6 +99,16 @@ pub struct Status {
     pub receive_bytes_per_sec: f64,
     pub conflicts: u64,
     #[serde(default)]
+    pub source_read_bytes: u64,
+    #[serde(default)]
+    pub scan_cache_reused_bytes: u64,
+    #[serde(default)]
+    pub signature_cache_hits: u64,
+    #[serde(default)]
+    pub signature_indexed_bytes: u64,
+    #[serde(default)]
+    pub delta_fallbacks: u64,
+    #[serde(default)]
     pub thermal: ThermalStatus,
     #[serde(default)]
     pub watch_limits: crate::capacity::Limits,
@@ -109,12 +119,21 @@ pub struct Status {
 pub struct Shared {
     pub home: PathBuf,
     pub id: String,
+    pub read_cache: Arc<crate::read_cache::ReadCache>,
+    pub chunk_cache_mib: u16,
+    source_read: AtomicU64,
+    scan_reused: AtomicU64,
+    signature_hits: AtomicU64,
+    signature_reads: AtomicU64,
+    delta_fallbacks: AtomicU64,
     stop: AtomicBool,
     sent: AtomicU64,
     received: AtomicU64,
     status: Mutex<Status>,
     gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     peer_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    lane_counts: Mutex<HashMap<String, u8>>,
+    connections: Mutex<HashSet<(String, u8)>>,
     ready: Mutex<HashSet<String>>,
     scan_controls: Mutex<HashMap<String, Arc<ScanControl>>>,
 }
@@ -122,6 +141,15 @@ impl Shared {
     pub(crate) fn new(home: &Path, id: String, listen: String) -> Self {
         Self {
             home: home.to_owned(),
+            read_cache: Arc::new(crate::read_cache::ReadCache::new(
+                config::load(home).map_or(0, |c| c.send_cache_mib),
+            )),
+            chunk_cache_mib: config::load(home).map_or(0, |c| c.chunk_cache_mib),
+            source_read: AtomicU64::new(0),
+            scan_reused: AtomicU64::new(0),
+            signature_hits: AtomicU64::new(0),
+            signature_reads: AtomicU64::new(0),
+            delta_fallbacks: AtomicU64::new(0),
             id: id.clone(),
             stop: AtomicBool::new(false),
             sent: AtomicU64::new(0),
@@ -137,6 +165,8 @@ impl Shared {
             }),
             gates: Mutex::new(HashMap::new()),
             peer_gates: Mutex::new(HashMap::new()),
+            lane_counts: Mutex::new(HashMap::new()),
+            connections: Mutex::new(HashSet::new()),
             ready: Mutex::new(HashSet::new()),
             scan_controls: Mutex::new(HashMap::new()),
         }
@@ -184,6 +214,22 @@ impl Shared {
     }
     pub fn stopping(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
+    }
+    pub fn source_read(&self, n: u64) {
+        self.source_read.fetch_add(n, Ordering::Relaxed);
+    }
+    pub fn cache_reused(&self, n: u64) {
+        self.scan_reused.fetch_add(n, Ordering::Relaxed);
+    }
+    pub fn signature(&self, hit: bool, bytes: u64) {
+        if hit {
+            self.signature_hits.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.signature_reads.fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
+    pub fn delta_fallback(&self) {
+        self.delta_fallbacks.fetch_add(1, Ordering::Relaxed);
     }
     pub fn bytes_sent(&self, n: u64) {
         self.sent.fetch_add(n, Ordering::Relaxed);
@@ -245,7 +291,20 @@ impl Shared {
             eprintln!("[{kind}] {} {detail}", folder.unwrap_or(""));
         }
     }
-    pub fn connected(&self, id: &str, connected: bool) {
+    pub fn lanes(&self, id: &str) -> u8 {
+        *self.lane_counts.lock().unwrap().get(id).unwrap_or(&1)
+    }
+    pub fn set_lanes(&self, id: &str, count: u8) {
+        self.lane_counts.lock().unwrap().insert(id.into(), count);
+    }
+    pub fn connected(&self, id: &str, lane: u8, connected: bool) {
+        let mut connections = self.connections.lock().unwrap();
+        if connected {
+            connections.insert((id.into(), lane));
+        } else {
+            connections.remove(&(id.into(), lane));
+        }
+        let connected = connections.iter().any(|(peer, _)| peer == id);
         let mut s = self.status.lock().unwrap();
         s.connected_peers.retain(|p| p != id);
         if connected {
@@ -333,6 +392,7 @@ fn scanner(shared: Arc<Shared>, folder_id: String) {
         if reload || root.as_ref().is_none_or(|r| r.folder != folder) {
             match engine::Root::open(folder.clone(), shared.gate(&folder_id)) {
                 Ok(mut opened) => {
+                    opened.read_cache = Some(shared.read_cache.clone());
                     opened.scan_control = shared
                         .scan_controls
                         .lock()
@@ -693,6 +753,64 @@ fn scanner(shared: Arc<Shared>, folder_id: String) {
     }
 }
 
+fn retention_worker(shared: Arc<Shared>) {
+    let mut last = HashMap::<String, Instant>::new();
+    let mut policy = crate::retention::Policy::default();
+    let mut next = Instant::now() + Duration::from_secs(60);
+    while !shared.stopping() {
+        if Instant::now() >= next {
+            next = Instant::now() + Duration::from_secs(60);
+            let Ok(cfg) = config::load(&shared.home) else {
+                continue;
+            };
+            if cfg.retention != policy {
+                last.clear();
+                policy = cfg.retention.clone();
+            }
+            if cfg.retention.automatic {
+                for folder in cfg.folders {
+                    if shared.stopping() {
+                        return;
+                    }
+                    if folder.paused
+                        || last
+                            .get(&folder.id)
+                            .is_some_and(|at| at.elapsed() < Duration::from_secs(3600))
+                    {
+                        continue;
+                    }
+                    let gate = shared.gate(&folder.id);
+                    let Ok(_guard) = gate.try_lock() else {
+                        continue;
+                    };
+                    last.insert(folder.id.clone(), Instant::now());
+                    let result =
+                        engine::Root::open(folder.clone(), gate.clone()).and_then(|root| {
+                            crate::retention::run(&shared.home, &root, &cfg.retention, true)
+                        });
+                    match result {
+                        Ok(report) if report.removed > 0 => shared.event(
+                            "retention",
+                            Some(&folder.id),
+                            &format!(
+                                "removed {} archives ({} payload bytes)",
+                                report.removed, report.removed_bytes
+                            ),
+                        ),
+                        Err(e) => shared.event(
+                            "retention",
+                            Some(&folder.id),
+                            &format!("cleanup stopped: {e:#}"),
+                        ),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+}
+
 pub fn serve(home: &Path) -> Result<()> {
     let (id, _) = config::identity(home)?;
     let cfg = config::load(home)?;
@@ -733,6 +851,10 @@ pub fn serve(home: &Path) -> Result<()> {
     let mut scanned = HashSet::new();
     let mut dialing = HashSet::new();
     let mut workers = Vec::new();
+    {
+        let s = shared.clone();
+        workers.push(thread::spawn(move || retention_worker(s)));
+    }
     let mut tick = Instant::now() - Duration::from_secs(2);
     let mut prev = (0, 0);
     let mut prev_at = Instant::now();
@@ -790,42 +912,61 @@ pub fn serve(home: &Path) -> Result<()> {
                 }
             }
             for p in cfg.peers {
-                if p.approved && p.address.is_some() && dialing.insert(p.id.clone()) {
+                if !p.approved || p.address.is_none() {
+                    continue;
+                }
+                for index in 0..cfg.transfer_lanes {
+                    if !dialing.insert(format!("{}:{index}", p.id)) {
+                        continue;
+                    }
                     let s = shared.clone();
+                    let p = p.clone();
                     workers.push(thread::spawn(move || {
                         while !s.stopping() {
-                            let current = config::load(&s.home).ok().and_then(|c| {
-                                c.peers.into_iter().find(|x| x.id == p.id && x.approved)
-                            });
-                            if let Some(p) = current
-                                && let Some(address) = p.address
-                            {
-                                let gate = s.peer_gate(&p.id);
-                                let available = gate.try_lock().is_ok();
-                                if available {
-                                    let result = (|| -> Result<()> {
-                                        let addr = address
-                                            .to_socket_addrs()?
-                                            .next()
-                                            .context("address did not resolve")?;
-                                        let stream = TcpStream::connect_timeout(
-                                            &addr,
-                                            Duration::from_secs(3),
-                                        )?;
-                                        protocol::session(
-                                            stream,
-                                            s.clone(),
-                                            Some(p.id.clone()),
-                                            true,
-                                        )
-                                    })();
-                                    if let Err(e) = result {
-                                        s.event("connection", None, &format!("{}: {e:#}", p.name));
+                            if index > 0 && index >= s.lanes(&p.id) {
+                                // Wake promptly after lane zero negotiates; reconnect backoff is
+                                // for failed connections, not workers awaiting their first grant.
+                                thread::sleep(Duration::from_millis(100));
+                                continue;
+                            }
+                            if index < s.lanes(&p.id) || index == 0 {
+                                let current = config::load(&s.home).ok().and_then(|c| {
+                                    c.peers.into_iter().find(|x| x.id == p.id && x.approved)
+                                });
+                                if let Some(peer) = current
+                                    && let Some(address) = peer.address
+                                {
+                                    let gate = s.peer_gate(&format!("{}:{index}", p.id));
+                                    if gate.try_lock().is_ok() {
+                                        let result = (|| -> Result<()> {
+                                            let addr = address
+                                                .to_socket_addrs()?
+                                                .next()
+                                                .context("address did not resolve")?;
+                                            let stream = TcpStream::connect_timeout(
+                                                &addr,
+                                                Duration::from_secs(3),
+                                            )?;
+                                            protocol::session_lane(
+                                                stream,
+                                                s.clone(),
+                                                Some(p.id.clone()),
+                                                true,
+                                                index,
+                                            )
+                                        })();
+                                        if let Err(e) = result {
+                                            s.event(
+                                                "connection",
+                                                None,
+                                                &format!("{} lane {index}: {e:#}", p.name),
+                                            );
+                                        }
                                     }
                                 }
                             }
                             let jitter = u64::from_str_radix(&p.id[..2], 16).unwrap_or(0);
-                            for _ in 0..(10 + jitter % 10) {
+                            for _ in 0..(10 + (jitter + u64::from(index) * 3) % 10) {
                                 if s.stopping() {
                                     break;
                                 }
@@ -856,6 +997,11 @@ pub fn serve(home: &Path) -> Result<()> {
                 f.scan_waiting_for_cooling = waiting.get(id).copied().unwrap_or(false);
             }
             status.updated = now();
+            status.source_read_bytes = shared.source_read.load(Ordering::Relaxed);
+            status.scan_cache_reused_bytes = shared.scan_reused.load(Ordering::Relaxed);
+            status.signature_cache_hits = shared.signature_hits.load(Ordering::Relaxed);
+            status.signature_indexed_bytes = shared.signature_reads.load(Ordering::Relaxed);
+            status.delta_fallbacks = shared.delta_fallbacks.load(Ordering::Relaxed);
             status.sent_bytes = sent;
             status.received_bytes = received;
             status.send_bytes_per_sec = (sent - prev.0) as f64 / dt;

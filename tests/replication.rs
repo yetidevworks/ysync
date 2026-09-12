@@ -924,3 +924,269 @@ fn unicode_equivalent_paths_replicate_without_renaming_local_files() {
         assert_eq!(names, vec![spelling.to_owned()]);
     }
 }
+
+#[test]
+fn reviewed_seed_bootstraps_existing_receiver_without_conflicts() {
+    let mut a = Device::new("seed-source");
+    let mut b = Device::new("seed-receiver");
+    a.write("shared", b"source version");
+    a.write("source-only", b"new file");
+    b.write("shared", b"old receiver");
+    for n in 0..140 {
+        b.write(&format!("retired/{n:03}/old"), b"retained receiver data");
+    }
+    let artifacts = tempfile::tempdir().unwrap();
+    let snapshot = artifacts.path().join("receiver.sqlite");
+    let plan = artifacts.path().join("seed.sqlite");
+    ysync::pairing::export(b.state.path(), "code", &snapshot).unwrap();
+    let summary =
+        ysync::pairing::preview(a.state.path(), "code", &snapshot, "seed-local", &plan).unwrap();
+    assert_eq!(summary.delete, 281);
+    ysync::pairing::apply(a.state.path(), &plan).unwrap();
+    a.dial(&b);
+    b.dial(&a);
+    b.start();
+    a.start();
+    wait(
+        "reviewed seed transfers and deletes across batches",
+        &a,
+        &b,
+        || {
+            equals(&b, "shared", b"source version")
+                && equals(&b, "source-only", b"new file")
+                && !b.path("retired").exists()
+        },
+    );
+    settled(&a, &b);
+    for d in [&a, &b] {
+        assert!(
+            ysync::conflicts::list(&ysync::store::open(d.state.path()).unwrap())
+                .unwrap()
+                .is_empty()
+        );
+    }
+    let archived: Vec<_> = fs::read_dir(b.path(".ysync/versions"))
+        .unwrap()
+        .map(|p| fs::read(p.unwrap().path()).unwrap())
+        .collect();
+    assert!(archived.iter().any(|v| v == b"old receiver"));
+    assert_eq!(
+        archived
+            .iter()
+            .filter(|v| *v == b"retained receiver data")
+            .count(),
+        140
+    );
+    a.write("shared", b"next source version");
+    wait("source edits after seeding", &a, &b, || {
+        equals(&b, "shared", b"next source version")
+    });
+    settled(&a, &b);
+    b.write("shared", b"deliberate later receiver edit");
+    wait("bidirectional edits still work after seed", &a, &b, || {
+        equals(&a, "shared", b"deliberate later receiver edit")
+    });
+    settled(&a, &b);
+}
+
+#[test]
+fn opt_in_automatic_retention_cleans_archives_while_daemon_runs() {
+    let mut a = Device::new("retention");
+    a.write("working", b"keep working file");
+    let dir = a.path(".ysync/versions");
+    fs::create_dir_all(&dir).unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    fs::write(dir.join(&id), b"old archive").unwrap();
+    fs::write(
+        dir.join(format!("{id}.json")),
+        serde_json::to_vec(&serde_json::json!({"path":"working","saved_at":1})).unwrap(),
+    )
+    .unwrap();
+    config::edit(a.state.path(), |c| {
+        c.retention.automatic = true;
+        c.retention.versions_days = Some(1);
+        Ok(())
+    })
+    .unwrap();
+    a.start();
+    let until = Instant::now() + Duration::from_secs(85);
+    while dir.join(&id).exists() && Instant::now() < until {
+        thread::sleep(Duration::from_millis(250));
+    }
+    assert!(!dir.join(&id).exists(), "automatic cleanup did not run");
+    assert!(equals(&a, "working", b"keep working file"));
+    assert!(ysync::daemon::read_status(a.state.path()).unwrap().pid > 0);
+}
+
+#[test]
+fn small_lane_progresses_while_bulk_is_blocked_then_layouts_can_change() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut a = Device::new("a");
+    let mut b = Device::new("b");
+    a.dial(&b);
+    b.dial(&a);
+    let data = delta_fixture(2 * 1024 * 1024);
+    a.write("private/bulk.bin", &data);
+    fs::set_permissions(a.path("private"), fs::Permissions::from_mode(0o700)).unwrap();
+    let hash = blake3::hash(&data).to_hex().to_string();
+    let key = blake3::hash(
+        &serde_json::to_vec(&(&a.id, "private/bulk.bin", &hash, data.len() as u64)).unwrap(),
+    );
+    fs::create_dir_all(b.path(".ysync/tmp")).unwrap();
+    let lock =
+        fs::File::create(b.path(&format!(".ysync/tmp/resume-{}.part", key.to_hex()))).unwrap();
+    fs2::FileExt::lock_exclusive(&lock).unwrap();
+    a.start();
+    b.start();
+    wait("bulk waiting on its private buffer", &a, &b, || {
+        ysync::daemon::read_status(b.state.path()).is_ok_and(|s| {
+            s.events
+                .iter()
+                .any(|e| e.detail.contains("resume buffer already in use"))
+        })
+    });
+    a.write("private/edit.txt", b"small edit bypasses blocked bulk");
+    wait("small lane independent progress", &a, &b, || {
+        equals(&b, "private/edit.txt", b"small edit bypasses blocked bulk")
+    });
+    assert!(!b.path("private/bulk.bin").exists());
+    assert_eq!(
+        fs::metadata(b.path("private"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    drop(lock);
+    wait("bulk recovery", &a, &b, || {
+        equals(&b, "private/bulk.bin", &data)
+    });
+    settled(&a, &b);
+    wait("scan bytes reused by sender", &a, &b, || {
+        ysync::daemon::read_status(a.state.path())
+            .is_ok_and(|s| s.scan_cache_reused_bytes >= data.len() as u64)
+    });
+    for count in [1, 2, 3] {
+        a.stop();
+        b.stop();
+        config::edit(a.state.path(), |c| {
+            c.transfer_lanes = count;
+            Ok(())
+        })
+        .unwrap();
+        // Receiver offers 3: exercise minimum negotiation as well as cursor migration.
+        a.write(
+            "private/bulk.bin",
+            if count == 2 { &data } else { b"now small" },
+        );
+        a.start();
+        b.start();
+        let expected: &[u8] = if count == 2 { &data } else { b"now small" };
+        wait("layout and size transition", &a, &b, || {
+            equals(&b, "private/bulk.bin", expected)
+        });
+        settled(&a, &b);
+    }
+    fs::remove_dir_all(a.path("private")).unwrap();
+    wait("delete after lane migration", &a, &b, || {
+        !b.path("private").exists()
+    });
+    settled(&a, &b);
+}
+
+#[test]
+fn receiver_chunk_index_survives_restart_and_avoids_next_basis_scan() {
+    let mut a = Device::new("a");
+    let mut b = Device::new("b");
+    a.dial(&b);
+    b.dial(&a);
+    let mut data = delta_fixture(4 * 1024 * 1024);
+    a.write("delta.bin", &data);
+    a.start();
+    b.start();
+    wait("cache baseline", &a, &b, || equals(&b, "delta.bin", &data));
+    settled(&a, &b);
+    wait("cache baseline accounting", &a, &b, || {
+        ysync::daemon::read_status(b.state.path())
+            .is_ok_and(|s| s.received_bytes == data.len() as u64)
+    });
+    data[100_000..104_096].fill(0x33);
+    delta_change(&a, &b, &data);
+    a.stop();
+    b.stop();
+    a.start();
+    b.start();
+    settled(&a, &b);
+    wait("fresh cache test status", &a, &b, || {
+        ysync::daemon::read_status(b.state.path())
+            .is_ok_and(|s| s.pid == b.child.as_ref().unwrap().id() && s.received_bytes == 0)
+    });
+    data[3_000_000..3_004_096].fill(0x44);
+    delta_change(&a, &b, &data);
+    wait("persistent receiver signature hit", &a, &b, || {
+        ysync::daemon::read_status(b.state.path()).is_ok_and(|s| s.signature_cache_hits > 0)
+    });
+    assert_eq!(
+        ysync::daemon::read_status(b.state.path())
+            .unwrap()
+            .signature_indexed_bytes,
+        0
+    );
+}
+
+#[test]
+fn ineffective_delta_streams_next_version_without_signature_reads() {
+    let mut a = Device::new("a");
+    let mut b = Device::new("b");
+    for d in [&a, &b] {
+        config::edit(d.state.path(), |c| {
+            c.send_cache_mib = 0;
+            Ok(())
+        })
+        .unwrap();
+    }
+    a.dial(&b);
+    b.dial(&a);
+    let mut data = delta_fixture(2 * 1024 * 1024);
+    a.write("rewrite.bin", &data);
+    a.start();
+    b.start();
+    wait("rewrite baseline", &a, &b, || {
+        equals(&b, "rewrite.bin", &data)
+    });
+    settled(&a, &b);
+    for byte in &mut data {
+        *byte ^= 0xff;
+    }
+    a.write("rewrite.bin", &data);
+    wait("ineffective delta fallback", &a, &b, || {
+        equals(&b, "rewrite.bin", &data)
+    });
+    settled(&a, &b);
+    wait("fallback counters", &a, &b, || {
+        ysync::daemon::read_status(a.state.path()).is_ok_and(|s| s.delta_fallbacks == 1)
+    });
+    let before = ysync::daemon::read_status(a.state.path()).unwrap();
+    for byte in &mut data {
+        *byte ^= 0x17;
+    }
+    a.write("rewrite.bin", &data);
+    wait("direct stream after ineffective delta", &a, &b, || {
+        equals(&b, "rewrite.bin", &data)
+    });
+    settled(&a, &b);
+    wait("adaptive accounting", &a, &b, || {
+        ysync::daemon::read_status(a.state.path())
+            .is_ok_and(|s| s.delta_fallbacks == 2 && s.sent_bytes == 3 * data.len() as u64)
+    });
+    let after = ysync::daemon::read_status(a.state.path()).unwrap();
+    assert_eq!(
+        after.signature_indexed_bytes,
+        before.signature_indexed_bytes
+    );
+    assert_eq!(
+        after.source_read_bytes - before.source_read_bytes,
+        data.len() as u64
+    );
+}

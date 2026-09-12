@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0
+
+- Add negotiated transfer lanes (default three, maximum eight), separating metadata/small edits from bounded bulk transfers. Preserve parent ordering, causal conflict checks, durable lane cursors, reconnect/layout migration, and back off idle exchanges.
+- Reuse scanned payloads through a bounded RAM cache (default 64 MiB, files up to 8 MiB); retain normal reads for cache misses and larger files.
+- Persist bounded chunk signatures, reuse received layouts on later edits, and skip ineffective deltas using measured reuse and per-path feedback. Add JSON work counters and configurable cache budgets; leave the TUI layout unchanged.
+- Require wire protocol 5: update both peers together. Existing identities, indexed versions and resumable payloads are retained; the first upgraded startup adds lane cursors and builds partial change indexes.
+
+- Add offline pairing export, merge/seed-local previews, paginated plan inspection, and explicit atomic seed application. Validate source snapshots, preserve receiver version archives, and retain protection for edits made after receiver export. Keep source working files unchanged.
+- Add opt-in archive retention with age/space limits, dry-run reports, manual cleanup, and hourly automatic maintenance. Protect unresolved/uncommitted conflicts, active downloads, unknown artifacts, and working paths.
+- Add regression and two-daemon tests for seeded existing folders, multi-batch deletions, retained receiver bytes, subsequent bidirectional edits, stale-plan rollback, and retention safeguards.
+
 ## 0.2.6
 
 - Add an on-demand conflict review panel (`c`) with folder scope, search, 50-record pages, current/local versus incoming metadata, bounded verified text previews, and keyboard scrolling.

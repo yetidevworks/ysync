@@ -22,6 +22,10 @@ const CHUNK: usize = 60 * 1024;
 const MAX_JSON: usize = 4 * 1024 * 1024;
 #[derive(Serialize, Deserialize, Debug)]
 enum Message {
+    Lane {
+        version: u32,
+        lane: crate::lanes::Lane,
+    },
     Hello {
         version: u32,
         name: String,
@@ -32,6 +36,7 @@ enum Message {
         reason: String,
     },
     Batch {
+        required_fast: u64,
         folder: String,
         entries: Vec<Entry>,
         upto: u64,
@@ -61,6 +66,8 @@ pub struct Wire {
     writer: BufWriter<TcpStream>,
     noise: snow::TransportState,
     pub peer: String,
+    lane: crate::lanes::Lane,
+    progress: bool,
 }
 fn raw_write(w: &mut impl Write, data: &[u8]) -> Result<()> {
     if data.len() > 65535 {
@@ -127,6 +134,8 @@ impl Wire {
             writer,
             noise: noise.into_transport_mode()?,
             peer,
+            lane: Default::default(),
+            progress: false,
         })
     }
     fn frame(&mut self, data: &[u8]) -> Result<()> {
@@ -226,7 +235,7 @@ impl Wire {
     }
 }
 
-fn hello(shared: &Shared, peer: &str) -> Result<Message> {
+fn hello(shared: &Shared, peer: &str, lane: crate::lanes::Lane) -> Result<Message> {
     let cfg = config::load(&shared.home)?;
     let p = cfg
         .peers
@@ -242,10 +251,10 @@ fn hello(shared: &Shared, peer: &str) -> Result<Message> {
         .collect();
     let mut cursors = BTreeMap::new();
     for f in &folders {
-        cursors.insert(f.clone(), store::cursor(&c, peer, f)?);
+        cursors.insert(f.clone(), store::lane_cursor(&c, peer, f, lane)?);
     }
     Ok(Message::Hello {
-        version: 4,
+        version: 5,
         name: cfg.name,
         folders,
         cursors,
@@ -295,7 +304,37 @@ fn root(shared: &Shared, peer: &str, folder: &str) -> Result<Root> {
     if !shared.ready(folder) {
         bail!("folder reconciliation not ready");
     }
-    Root::open(f, shared.gate(folder))
+    let mut root = Root::open(f, shared.gate(folder))?;
+    root.read_cache = Some(shared.read_cache.clone());
+    Ok(root)
+}
+enum SourceReader {
+    Disk(cap_std::fs::File),
+    Memory(std::io::Cursor<Arc<[u8]>>),
+}
+struct Source<'a> {
+    reader: SourceReader,
+    shared: &'a Shared,
+}
+impl Read for Source<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match &mut self.reader {
+            SourceReader::Disk(f) => {
+                let n = f.read(buf)?;
+                self.shared.source_read(n as u64);
+                Ok(n)
+            }
+            SourceReader::Memory(c) => c.read(buf),
+        }
+    }
+}
+impl Seek for Source<'_> {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        match &mut self.reader {
+            SourceReader::Disk(f) => f.seek(pos),
+            SourceReader::Memory(c) => c.seek(pos),
+        }
+    }
 }
 struct BasisFile {
     file: cap_std::fs::File,
@@ -331,24 +370,45 @@ impl BasisFile {
     }
     fn signature(
         &mut self,
+        shared: &Shared,
+        folder: &str,
+        path: &str,
         params: Parameters,
         progress: impl FnMut() -> Result<()>,
     ) -> Result<Vec<Block>> {
         if engine::stamp(&self.file.metadata()?) != self.stamp {
             bail!("basis changed before indexing");
         }
-        self.file.seek(SeekFrom::Start(0))?;
-        let blocks = delta::signature(
-            &mut self.file,
-            0,
+        if let Some((blocks, _)) = crate::chunk_cache::get(
+            &shared.home,
+            folder,
+            path,
+            &self.stamp,
             self.size,
             params,
-            &mut blake3::Hasher::new(),
-            progress,
-        )?;
+            shared.chunk_cache_mib,
+        ) {
+            shared.signature(true, 0);
+            return Ok(blocks);
+        }
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut whole = blake3::Hasher::new();
+        let blocks = delta::signature(&mut self.file, 0, self.size, params, &mut whole, progress)?;
         if engine::stamp(&self.file.metadata()?) != self.stamp {
             bail!("basis changed during indexing");
         }
+        shared.signature(false, self.size);
+        crate::chunk_cache::put(
+            &shared.home,
+            folder,
+            path,
+            &self.stamp,
+            self.size,
+            params,
+            &blocks,
+            whole.finalize().to_hex().as_ref(),
+            shared.chunk_cache_mib,
+        );
         Ok(blocks)
     }
 }
@@ -446,13 +506,31 @@ fn send_batch(w: &mut Wire, shared: &Shared, folder: &str, after: u64) -> Result
     let root = root(shared, &w.peer, folder)?;
     root.check()?;
     let c = store::open(&shared.home)?;
-    let entries = store::changes(&c, folder, after, 128)?;
-    let upto = entries.last().map(|e| e.seq).unwrap_or(after);
+    let (entries, upto) = store::lane_changes(&c, folder, after, w.lane)?;
+    let mut required_fast = 0;
+    if w.lane.index > 0 {
+        for e in &entries {
+            for parent in Path::new(&e.path)
+                .ancestors()
+                .skip(1)
+                .filter_map(Path::to_str)
+                .filter(|p| !p.is_empty())
+            {
+                let dir =
+                    store::get(&c, folder, parent)?.context("parent metadata not indexed yet")?;
+                if dir.kind != Kind::Directory {
+                    bail!("parent metadata changed; retry transfer");
+                }
+                required_fast = required_fast.max(dir.seq);
+            }
+        }
+    }
     let entries: Vec<_> = entries
         .into_iter()
         .filter(|e| !root.excluded(&e.path))
         .collect();
     w.send(&Message::Batch {
+        required_fast,
         folder: folder.into(),
         entries: entries.clone(),
         upto,
@@ -472,14 +550,35 @@ fn send_batch(w: &mut Wire, shared: &Shared, folder: &str, after: u64) -> Result
             bail!("peer requested data for non-file");
         }
         root.parents(&e.path, false)?;
-        let mut file = root.dir.open(&e.path)?;
-        let initial = engine::stamp(&file.metadata()?);
+        let handle = root.dir.open(&e.path)?;
+        let initial = engine::stamp(&handle.metadata()?);
+        let reader = if let Some(bytes) = shared.read_cache.get(folder, &e.path, &initial, &e.hash)
+        {
+            shared.cache_reused(bytes.len() as u64);
+            SourceReader::Memory(std::io::Cursor::new(bytes))
+        } else {
+            SourceReader::Disk(handle.try_clone()?)
+        };
+        let mut file = Source { reader, shared };
         let (offset, mut hash) =
             accept_resume(&mut file, e.size, &request, || w.send(&Message::Preparing))?;
-        let use_delta = request
+        let eligible_delta = request
             .basis_size
             .is_some_and(|size| size >= delta::THRESHOLD && size <= i64::MAX as u64)
             && e.size - offset >= delta::THRESHOLD;
+        let skip_delta = eligible_delta
+            && crate::chunk_cache::skip_delta(
+                &shared.home,
+                &w.peer,
+                folder,
+                &e.path,
+                shared.chunk_cache_mib,
+            );
+        if skip_delta {
+            shared.delta_fallback();
+        }
+        let use_delta = eligible_delta && !skip_delta;
+        let mut delta_hash = None;
         w.send_buffered(&Message::FileStart {
             offset,
             delta: use_delta,
@@ -494,34 +593,90 @@ fn send_batch(w: &mut Wire, shared: &Shared, folder: &str, after: u64) -> Result
                     blocks: Some(blocks),
                 } => {
                     delta::validate_basis(&blocks, basis_size, params)?;
-                    let source = delta::signature(
-                        &mut file,
-                        offset,
-                        e.size - offset,
-                        params,
-                        &mut hash,
-                        || w.send(&Message::Preparing),
-                    )?;
-                    if hash.finalize().to_hex().as_str() != e.hash
-                        || engine::stamp(&file.metadata()?) != initial
-                    {
-                        bail!("source changed during delta indexing: {}", e.path);
-                    }
+                    let cached = if offset == 0 {
+                        crate::chunk_cache::get(
+                            &shared.home,
+                            folder,
+                            &e.path,
+                            &initial,
+                            e.size,
+                            params,
+                            shared.chunk_cache_mib,
+                        )
+                        .filter(|(_, h)| h == &e.hash)
+                    } else {
+                        None
+                    };
+                    let (source, whole) = if let Some(cached) = cached {
+                        shared.signature(true, 0);
+                        cached
+                    } else {
+                        let source = delta::signature(
+                            &mut file,
+                            offset,
+                            e.size - offset,
+                            params,
+                            &mut hash,
+                            || w.send(&Message::Preparing),
+                        )?;
+                        let whole = hash.finalize().to_hex().to_string();
+                        if whole != e.hash || engine::stamp(&handle.metadata()?) != initial {
+                            bail!("source changed during delta indexing: {}", e.path);
+                        }
+                        shared.signature(false, e.size - offset);
+                        if offset == 0 {
+                            crate::chunk_cache::put(
+                                &shared.home,
+                                folder,
+                                &e.path,
+                                &initial,
+                                e.size,
+                                params,
+                                &source,
+                                &whole,
+                                shared.chunk_cache_mib,
+                            );
+                        }
+                        (source, whole)
+                    };
                     let operations = delta::plan(&source, &blocks);
-                    w.send_buffered(&Message::DeltaPlan {
-                        operations: Some(operations.clone()),
-                    })?;
-                    for (block, op) in source.iter().zip(&operations) {
-                        if op.basis_offset.is_none() {
-                            file.seek(SeekFrom::Start(block.offset))?;
-                            let mut block_hash = blake3::Hasher::new();
-                            send_payload(w, shared, &mut file, block.len, &mut block_hash)?;
-                            if block_hash.finalize().to_hex().as_str() != block.hash {
-                                bail!("source changed while sending delta block");
+                    let useful = delta::worthwhile(
+                        &operations,
+                        e.size - offset,
+                        serde_json::to_vec(&blocks)?.len(),
+                    );
+                    crate::chunk_cache::feedback(
+                        &shared.home,
+                        &w.peer,
+                        folder,
+                        &e.path,
+                        useful,
+                        shared.chunk_cache_mib,
+                    );
+                    if useful {
+                        w.send_buffered(&Message::DeltaPlan {
+                            operations: Some(operations.clone()),
+                        })?;
+                        for (block, op) in source.iter().zip(&operations) {
+                            if op.basis_offset.is_none() {
+                                file.seek(SeekFrom::Start(block.offset))?;
+                                let mut block_hash = blake3::Hasher::new();
+                                send_payload(w, shared, &mut file, block.len, &mut block_hash)?;
+                                if block_hash.finalize().to_hex().as_str() != block.hash {
+                                    bail!("source changed while sending delta block");
+                                }
                             }
                         }
+                        delta_hash = Some(whole);
+                        used_delta = true;
+                    } else {
+                        shared.delta_fallback();
+                        w.send_buffered(&Message::DeltaPlan { operations: None })?;
+                        file.seek(SeekFrom::Start(0))?;
+                        hash = crate::transfer::hash_prefix(&mut file, offset, || {
+                            w.send(&Message::Preparing)
+                        })?;
                     }
-                    used_delta = true;
                 }
                 Message::Basis { blocks: None } => {
                     w.send_buffered(&Message::DeltaPlan { operations: None })?
@@ -532,8 +687,10 @@ fn send_batch(w: &mut Wire, shared: &Shared, folder: &str, after: u64) -> Result
         if !used_delta {
             send_payload(w, shared, &mut file, e.size - offset, &mut hash)?;
         }
-        let valid = hash.finalize().to_hex().as_str() == e.hash
-            && engine::stamp(&file.metadata()?) == initial;
+        let valid = delta_hash.as_deref().map_or_else(
+            || hash.finalize().to_hex().as_str() == e.hash,
+            |h| h == e.hash,
+        ) && engine::stamp(&handle.metadata()?) == initial;
         w.send_buffered(&Message::FileEnd { valid })?;
         if !valid {
             bail!("source changed during transfer: {}", e.path);
@@ -550,14 +707,24 @@ fn send_batch(w: &mut Wire, shared: &Shared, folder: &str, after: u64) -> Result
     }
 }
 fn receive_batch(w: &mut Wire, shared: &Shared, expected_folder: &str) -> Result<()> {
-    let (folder, entries, upto) = match w.recv()? {
+    let (folder, entries, upto, required_fast) = match w.recv()? {
         Message::Batch {
+            required_fast,
             folder,
             entries,
             upto,
-        } if folder == expected_folder && entries.len() <= 128 => (folder, entries, upto),
+        } if folder == expected_folder && entries.len() <= 128 => {
+            (folder, entries, upto, required_fast)
+        }
         _ => bail!("invalid batch"),
     };
+    if (w.lane.index == 0 && required_fast != 0) || required_fast > i64::MAX as u64 {
+        bail!("invalid directory prerequisite");
+    }
+    if entries.iter().any(|e| !w.lane.includes(e)) {
+        bail!("entry assigned to wrong transfer lane");
+    }
+    let lane = w.lane;
     let mut root = root(shared, &w.peer, &folder)?;
     let control = Arc::new(crate::scanning::ScanControl::default());
     root.scan_control = Some(control.clone());
@@ -583,7 +750,7 @@ fn receive_batch(w: &mut Wire, shared: &Shared, expected_folder: &str) -> Result
         check("Checking destination files and index"),
         || {
             let c = store::open(&shared.home)?;
-            let prior = store::cursor(&c, &peer, &folder)?;
+            let prior = store::lane_cursor(&c, &peer, &folder, lane)?;
             if upto < prior
                 || entries.windows(2).any(|v| v[0].seq >= v[1].seq)
                 || entries.iter().any(|e| e.seq <= prior || e.seq > upto)
@@ -619,6 +786,8 @@ fn receive_batch(w: &mut Wire, shared: &Shared, expected_folder: &str) -> Result
         w.send(&Message::Ack { upto })?;
         return Ok(());
     }
+    let mut signatures = BTreeMap::new();
+    let mut signature_blocks = 0;
     let result = (|| -> Result<()> {
         for e in &entries {
             let Some(partial) = partials.get_mut(&e.path) else {
@@ -640,9 +809,12 @@ fn receive_batch(w: &mut Wire, shared: &Shared, expected_folder: &str) -> Result
                     .context("unrequested delta transfer")?;
                 let mut basis = BasisFile::open(&root, &e.path).filter(|b| b.size == basis_size);
                 let params = Parameters::for_sizes(e.size, basis_size);
-                let blocks = basis
-                    .as_mut()
-                    .and_then(|b| b.signature(params, || w.send(&Message::Preparing)).ok());
+                let blocks = basis.as_mut().and_then(|b| {
+                    b.signature(shared, &folder, &e.path, params, || {
+                        w.send(&Message::Preparing)
+                    })
+                    .ok()
+                });
                 let offered = blocks.is_some();
                 w.send(&Message::Basis { blocks })?;
                 match w.recv_prepared()? {
@@ -657,6 +829,26 @@ fn receive_batch(w: &mut Wire, shared: &Shared, expected_folder: &str) -> Result
                             basis.as_mut().unwrap(),
                             &operations,
                         )?;
+                        if offset == 0
+                            && shared.chunk_cache_mib > 0
+                            && signature_blocks + operations.len() <= delta::MAX_BLOCKS * 4
+                        {
+                            let mut offset = 0;
+                            let blocks = operations
+                                .iter()
+                                .map(|op| {
+                                    let b = Block {
+                                        offset,
+                                        len: op.len,
+                                        hash: op.hash.clone(),
+                                    };
+                                    offset += op.len;
+                                    b
+                                })
+                                .collect::<Vec<_>>();
+                            signature_blocks += blocks.len();
+                            signatures.insert(e.path.clone(), (blocks, params));
+                        }
                         if reused > 0 {
                             shared.delta_reused(&folder, &e.path, reused);
                         }
@@ -690,6 +882,7 @@ fn receive_batch(w: &mut Wire, shared: &Shared, expected_folder: &str) -> Result
             let folder = &folder;
             let peer = &peer;
             let control = &control;
+            let signatures = &signatures;
             w.preparing(
                 control,
                 check("Waiting for scanner access or committing received files"),
@@ -701,6 +894,22 @@ fn receive_batch(w: &mut Wire, shared: &Shared, expected_folder: &str) -> Result
                         file.sync_all()?;
                         Ok(())
                     })?;
+                    if lane.index > 0 {
+                        let waiting = Instant::now();
+                        while store::lane_cursor(
+                            c,
+                            peer,
+                            folder,
+                            crate::lanes::Lane { index: 0, ..lane },
+                        )? < required_fast
+                        {
+                            control.checkpoint()?;
+                            if waiting.elapsed() > Duration::from_secs(60) {
+                                bail!("small-file lane has not committed parent metadata; retry");
+                            }
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+                    }
                     let _guard = loop {
                         control.checkpoint()?;
                         match root.gate.try_lock() {
@@ -713,6 +922,25 @@ fn receive_batch(w: &mut Wire, shared: &Shared, expected_folder: &str) -> Result
                             }
                         }
                     };
+                    if lane.index > 0 {
+                        // Metadata may have advanced to a deletion or type change while the payload streamed. Never invent those parents again.
+                        for e in entries {
+                            for p in Path::new(&e.path)
+                                .ancestors()
+                                .skip(1)
+                                .filter_map(Path::to_str)
+                                .filter(|p| !p.is_empty())
+                            {
+                                if !store::get(c, folder, p)?
+                                    .is_some_and(|e| e.kind == Kind::Directory)
+                                {
+                                    bail!(
+                                        "parent was removed or changed; retry after reconciliation"
+                                    );
+                                }
+                            }
+                        }
+                    }
                     // Recheck permissions and pause/revocation after the data transfer, before any publication.
                     let _ = self::root(shared, peer, folder)?;
                     let tx =
@@ -740,8 +968,36 @@ fn receive_batch(w: &mut Wire, shared: &Shared, expected_folder: &str) -> Result
                     }
                     control.checkpoint()?;
                     engine::sync_directories(root, entries)?;
-                    store::set_cursor(&tx, peer, folder, upto)?;
+                    store::set_lane_cursor(&tx, peer, folder, lane, upto)?;
                     tx.commit()?;
+                    for e in entries {
+                        if let Some((blocks, params)) = signatures.get(&e.path)
+                            && let Some(current) = store::get(c, folder, &e.path)?
+                            && current.same_content(e)
+                            && let Some(partial) = partials.get(&e.path)
+                        {
+                            let stamp =
+                                engine::stamp(&cap_std::fs::Metadata::from_file(&partial.file)?);
+                            if stamp == current.stamp
+                                && root
+                                    .dir
+                                    .symlink_metadata(&e.path)
+                                    .is_ok_and(|m| engine::stamp(&m) == stamp)
+                            {
+                                crate::chunk_cache::put(
+                                    &shared.home,
+                                    folder,
+                                    &e.path,
+                                    &stamp,
+                                    e.size,
+                                    *params,
+                                    blocks,
+                                    &e.hash,
+                                    shared.chunk_cache_mib,
+                                );
+                            }
+                        }
+                    }
                     for e in entries {
                         if !root.excluded(&e.path) {
                             shared.file_received(folder, &e.path);
@@ -755,6 +1011,7 @@ fn receive_batch(w: &mut Wire, shared: &Shared, expected_folder: &str) -> Result
         Ok(())
     })();
     if result.is_ok() {
+        w.progress |= upto > prior;
         for partial in partials.values() {
             let _ = root.dir.remove_file(&partial.name);
         }
@@ -768,6 +1025,15 @@ pub fn session(
     expected: Option<String>,
     initiator: bool,
 ) -> Result<()> {
+    session_lane(stream, shared, expected, initiator, 0)
+}
+pub fn session_lane(
+    stream: TcpStream,
+    shared: Arc<Shared>,
+    expected: Option<String>,
+    initiator: bool,
+    index: u8,
+) -> Result<()> {
     let mut w = Wire::handshake(stream, &shared.home, expected.as_deref(), initiator)?;
     if w.peer == shared.id {
         bail!("cannot synchronize with self");
@@ -779,18 +1045,60 @@ pub fn session(
         })?;
         bail!("device awaiting approval");
     }
-    // Bidirectional peers can dial simultaneously. Only one session acquires the per-device gate.
-    let gate = shared.peer_gate(&w.peer);
-    let Ok(_guard) = gate.try_lock() else {
-        bail!("device already connected");
+    let configured = config::load(&shared.home)?.transfer_lanes;
+    let lane = if initiator {
+        let offered = crate::lanes::Lane {
+            index,
+            count: configured,
+        };
+        offered.validate()?;
+        w.send(&Message::Lane {
+            version: 5,
+            lane: offered,
+        })?;
+        match w.recv()? {
+            Message::Lane { version: 5, lane }
+                if lane.index == index && lane.count <= configured =>
+            {
+                lane.validate()?;
+                lane
+            }
+            Message::Denied { reason } => bail!("peer denied lane: {reason}"),
+            _ => bail!("incompatible protocol; update both peers"),
+        }
+    } else {
+        let offered = match w.recv()? {
+            Message::Lane { version: 5, lane } => lane,
+            _ => bail!("incompatible protocol; update both peers"),
+        };
+        offered.validate()?;
+        let lane = crate::lanes::Lane {
+            index: offered.index,
+            count: configured.min(offered.count),
+        };
+        if lane.validate().is_err() {
+            w.send(&Message::Denied {
+                reason: "lane exceeds negotiated limit".into(),
+            })?;
+            bail!("lane exceeds negotiated limit");
+        }
+        w.send(&Message::Lane { version: 5, lane })?;
+        lane
     };
+    w.lane = lane;
     let peer = w.peer.clone();
-    shared.connected(&peer, true);
+    shared.set_lanes(&peer, lane.count);
+    // Separate gates allow independent payload lanes without duplicate ownership of a cursor.
+    let gate = shared.peer_gate(&format!("{}:{}", peer, lane.index));
+    let Ok(_guard) = gate.try_lock() else {
+        bail!("transfer lane already connected");
+    };
+    shared.connected(&peer, lane.index, true);
     let result = (|| -> Result<()> {
-        w.send(&hello(&shared, &peer)?)?;
+        w.send(&hello(&shared, &peer, lane)?)?;
         let (remote_folders, mut remote_cursors) = match w.recv()? {
             Message::Hello {
-                version: 4,
+                version: 5,
                 folders,
                 cursors,
                 ..
@@ -798,7 +1106,7 @@ pub fn session(
             Message::Denied { reason } => bail!("peer denied connection: {reason}"),
             _ => bail!("incompatible protocol"),
         };
-        let local = match hello(&shared, &peer)? {
+        let local = match hello(&shared, &peer, lane)? {
             Message::Hello { folders, .. } => folders,
             _ => unreachable!(),
         };
@@ -810,16 +1118,23 @@ pub fn session(
         if folders.is_empty() {
             bail!("no approved, scanned folders in common");
         }
-        let mut rounds = 0;
+        let started = Instant::now();
+        let mut idle_rounds = 0u64;
         while !shared.stopping() {
+            if shared.lanes(&peer) != lane.count {
+                bail!("lane layout changed; reconnect");
+            }
+            w.progress = false;
             for f in &folders {
                 if initiator {
                     let n = send_batch(&mut w, &shared, f, *remote_cursors.get(f).unwrap_or(&0))?;
+                    w.progress |= n > *remote_cursors.get(f).unwrap_or(&0);
                     remote_cursors.insert(f.clone(), n);
                     receive_batch(&mut w, &shared, f)?;
                 } else {
                     receive_batch(&mut w, &shared, f)?;
                     let n = send_batch(&mut w, &shared, f, *remote_cursors.get(f).unwrap_or(&0))?;
+                    w.progress |= n > *remote_cursors.get(f).unwrap_or(&0);
                     remote_cursors.insert(f.clone(), n);
                 }
             }
@@ -837,15 +1152,27 @@ pub fn session(
                 };
                 w.send(&Message::Turn)?;
             }
-            rounds += 1;
-            if rounds % 100 == 0 {
+            if started.elapsed() >= Duration::from_secs(60) {
                 break;
-            } // Refresh folder grants and shared-folder list without a daemon restart.
-            std::thread::sleep(Duration::from_millis(50));
+            }
+            idle_rounds = if w.progress {
+                0
+            } else {
+                (idle_rounds + 1).min(10)
+            };
+            // Only the initiator paces the exchange. Back off empty rounds so extra
+            // lanes do not multiply idle database work at the active transfer rate.
+            if initiator {
+                std::thread::sleep(Duration::from_millis(if w.progress {
+                    2
+                } else {
+                    idle_rounds * 25
+                }));
+            }
         }
         Ok(())
     })();
-    shared.connected(&peer, false);
+    shared.connected(&peer, lane.index, false);
     result
 }
 

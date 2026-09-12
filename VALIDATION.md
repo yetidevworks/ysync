@@ -238,3 +238,33 @@ Local macOS validation: 57 unit tests and 13 integration tests passed with nativ
 The panel queries read-only SQLite connections only on request, returns at most 50 records per page, and reads verified text previews capped at 64 KiB. Selected changed working files may be hashed up to 16 MiB to support manual merges without a daemon restart; larger changed files need scanner indexing first. One background worker keeps these operations off the terminal event loop.
 
 Resolver tests reject running-daemon access, stale content/metadata and clock reviews, and a deleted path recreated after review. A manually merged file resolves without changing its bytes, incoming archives remain, unrelated conflict records remain, and a failed decision rolls back index changes. Preview tests cover binary/oversized content, corrupted archives, symlink archive rejection, scoped search and bounded pages. Render tests exercise narrow and wide layouts and keep confirmation controls visible. The real terminal test cancels a resolution, then explicitly confirms one disposable record and checks the database and preserved local absence. Existing encrypted transfer and conflict-propagation tests still apply.
+
+## Unreleased pairing and retention
+
+Local macOS validation on September 12, 2026 passes 74 unit tests and 15 integration tests with native watchers required. Clippy with warnings denied, Rust 1.88 all-target checks, terminal restoration/conflict-panel PTY checks, and a disposable-folder CLI walkthrough also pass. These features have not yet been released or deployed to the live Homebrew services; new Linux execution/CI validation remains outstanding.
+
+Pairing coverage includes normal merge versus explicit source seeding, stale-plan transaction rollback, changed folder exclusions, daemon-lock refusal, receiver edits after snapshot export, retained original receiver bytes, and source working-file preservation. A two-daemon seed trial removes 281 receiver-only file/directory entries across multiple protocol batches, transfers source-only files, reaches identical indexes without conflicts, then verifies subsequent edits in both directions. Restored directory permissions are published before source-only children to avoid creating receiver-local metadata divergence.
+
+Retention coverage includes disabled defaults, non-deleting previews, age and space policies, working-file hard-link preservation, locked resumable buffers, symlink/unknown-artifact protection, and protection of both pending and uncommitted conflict archives. An integration test enables automatic maintenance on a disposable daemon, verifies that its first scheduled cleanup removes an old archive, and verifies that the working file and running daemon remain intact. No real conflict/version archives were cleaned and no live retention policy was enabled during development.
+
+## Unreleased transfer lanes and disk-read reduction
+
+September 12, 2026 macOS validation covered 80 unit tests and 18 integration tests. The full suite passed with native watchers required, followed by targeted rechecks for the final lane-startup timing adjustment and signature-cache eviction test. Clippy with warnings denied, Rust 1.88 all-target checks, formatting, and the real-terminal monitor/conflict-panel checks pass. New independent Linux execution remains outstanding. The live Homebrew services were not upgraded, and no real sync files or archive policies were changed by these trials.
+
+A deterministic two-daemon test locks a large file's receive buffer, observes the blocked bulk lane, and requires a later small edit to arrive while that lock remains held. It then releases the lock, verifies the large payload and parent mode 0700, changes negotiated lane counts through 1/2/3, moves a file between small/bulk sizes, and verifies recursive deletion and equal indexes. Existing simultaneous dialing, restart/resume, interrupted delta, Unicode, independent-edit conflicts, pause and revocation tests pass with the new default lanes. Cursor tests drain multiple query pages without skips and retain the minimum durable watermark across layout changes.
+
+A cache integration test makes two delta edits separated by daemon restarts: the second receiver update uses a persistent signature and reports zero new basis-signature input bytes. A complete-file rewrite test verifies that an ineffective delta falls back, then the next version streams with no additional signature reads and exactly one source payload read. Cache unit tests reject changed fingerprints/parameters, corrupted records and corrupt SQLite files, compare cached manifests with originals, enforce eviction/byte budgets, and verify bounded per-path feedback. Existing payload and copied-chunk verification remains active. The 64 MiB scan cache only captures files up to 8 MiB; these changes do not eliminate the second source read for all initial files.
+
+Final sequential loopback samples are saved in [benchmarks/transfer-lanes-local.json](benchmarks/transfer-lanes-local.json). Every received payload was checked. These measurements include startup and durable publication, with two scan workers on each disposable daemon:
+
+| Workload | Build/settings | Bootstrap | Payload rate | Transfer-side source reads |
+| --- | --- | ---: | ---: | ---: |
+| 2,000 × 4 KiB | Released 0.2.6 | 8.028 s | 1.02 MB/s | Not instrumented |
+| 2,000 × 4 KiB | New, 3 lanes, 64 MiB scan cache | 6.507 s | 1.26 MB/s | 0 |
+| 2,000 × 4 KiB | New, 3 lanes, cache disabled | 7.979 s | 1.03 MB/s | 8,192,019 bytes |
+| 64 × 16 MiB | New, 1 lane, cache disabled | 5.653 s | 189.94 MB/s | 1,073,741,843 bytes |
+| 64 × 16 MiB | New, 3 lanes, cache disabled | 4.391 s | 244.52 MB/s | 1,073,741,843 bytes |
+
+The source-read counters include the 19-byte post-bootstrap edit probe and exclude scanner reads; they are not physical device I/O. The cached small-file run reused all 8,192,019 bytes for sending. Post-bootstrap watcher probes took 181–312 ms in these final trials. Their timing does not measure edits during bulk traffic; the locked-buffer integration test establishes that independence.
+
+These are single final samples with no randomized order or cold-cache control. Earlier exploratory runs varied substantially, including a 1 GiB comparison of 214 MB/s with one lane versus 212 MB/s with three. The final results support fewer duplicate reads and functioning concurrency, not a universal throughput gain. Repeated representative LAN/disk tests and CPU/temperature measurements remain necessary before claiming production performance improvements. Wire protocol 5 requires upgrading both peers together; first startup builds the new partial change indexes over existing indexed entries.

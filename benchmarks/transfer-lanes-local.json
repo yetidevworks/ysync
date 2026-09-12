@@ -1,0 +1,102 @@
+{
+  "date": "2026-09-12",
+  "scope": "Disposable macOS two-daemon loopback trials on one filesystem; two scan/hash workers per daemon. No test suite or build ran alongside this final comparison. Every payload was verified. Bootstrap includes daemon startup, indexing, transfer and durable publication. Samples are not representative LAN measurements or a guaranteed speedup.",
+  "builds": {
+    "old": "Homebrew 0.2.6",
+    "new": "Unreleased source with protocol 5, lane startup fix, bounded scan cache and persistent/adaptive deltas"
+  },
+  "trials": [
+    {
+      "label": "final-small-old",
+      "scan_workers": 2,
+      "files": 2000,
+      "bytes": 8192000,
+      "bootstrap_seconds": 8.028,
+      "files_per_second": 249.1,
+      "payload_MB_per_second": 1.02,
+      "edit_latency_ms": 180.7,
+      "environment": "two local daemons, loopback, same filesystem",
+      "verified_all_payloads": true,
+      "transfer_lanes": 1,
+      "send_cache_mib": 0,
+      "chunk_cache_mib": null,
+      "source_read_bytes": null,
+      "scan_cache_reused_bytes": null
+    },
+    {
+      "label": "final-small-new",
+      "scan_workers": 2,
+      "files": 2000,
+      "bytes": 8192000,
+      "bootstrap_seconds": 6.507,
+      "files_per_second": 307.4,
+      "payload_MB_per_second": 1.26,
+      "edit_latency_ms": 249.2,
+      "environment": "two local daemons, loopback, same filesystem",
+      "verified_all_payloads": true,
+      "transfer_lanes": 3,
+      "send_cache_mib": 64,
+      "chunk_cache_mib": null,
+      "source_read_bytes": 0,
+      "scan_cache_reused_bytes": 8192019
+    },
+    {
+      "label": "final-small-no-cache",
+      "scan_workers": 2,
+      "files": 2000,
+      "bytes": 8192000,
+      "bootstrap_seconds": 7.979,
+      "files_per_second": 250.7,
+      "payload_MB_per_second": 1.03,
+      "edit_latency_ms": 231.7,
+      "environment": "two local daemons, loopback, same filesystem",
+      "verified_all_payloads": true,
+      "transfer_lanes": 3,
+      "send_cache_mib": 0,
+      "chunk_cache_mib": null,
+      "source_read_bytes": 8192019,
+      "scan_cache_reused_bytes": 0
+    },
+    {
+      "label": "final-bulk-one",
+      "scan_workers": 2,
+      "files": 64,
+      "bytes": 1073741824,
+      "bootstrap_seconds": 5.653,
+      "files_per_second": 11.3,
+      "payload_MB_per_second": 189.94,
+      "edit_latency_ms": 277.6,
+      "environment": "two local daemons, loopback, same filesystem",
+      "verified_all_payloads": true,
+      "transfer_lanes": 1,
+      "send_cache_mib": 0,
+      "chunk_cache_mib": null,
+      "source_read_bytes": 1073741843,
+      "scan_cache_reused_bytes": 0
+    },
+    {
+      "label": "final-bulk-three",
+      "scan_workers": 2,
+      "files": 64,
+      "bytes": 1073741824,
+      "bootstrap_seconds": 4.391,
+      "files_per_second": 14.6,
+      "payload_MB_per_second": 244.52,
+      "edit_latency_ms": 312.2,
+      "environment": "two local daemons, loopback, same filesystem",
+      "verified_all_payloads": true,
+      "transfer_lanes": 3,
+      "send_cache_mib": 0,
+      "chunk_cache_mib": null,
+      "source_read_bytes": 1073741843,
+      "scan_cache_reused_bytes": 0
+    }
+  ],
+  "limitations": [
+    "Single sample per final configuration, same-host disk and OS caching effects, no cold-cache control or randomized order.",
+    "Earlier exploratory small-file trials varied from 6.5 to 8.0 seconds for 0.2.6 and 5.9 to 7.2 seconds for the new build; some overlapped test/build activity.",
+    "An earlier 1 GiB trial measured 214 MB/s with one lane and 212 MB/s with three. The final bulk difference needs repeated LAN validation.",
+    "source_read_bytes counts transfer-side file reads, not physical disk I/O or scanner hashing.",
+    "The small edit probe runs after bootstrap; blocked-bulk responsiveness is covered separately by a deterministic integration test."
+  ]
+}

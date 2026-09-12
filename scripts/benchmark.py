@@ -23,6 +23,9 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--binary", required=True)
     p.add_argument("--scan-workers", type=int, default=8)
+    p.add_argument("--transfer-lanes", type=int, choices=range(1, 9))
+    p.add_argument("--send-cache-mib", type=int)
+    p.add_argument("--chunk-cache-mib", type=int)
     p.add_argument("--files", type=int, default=10000)
     p.add_argument("--size", type=int, default=4096)
     p.add_argument("--timeout", type=float, default=600)
@@ -45,6 +48,11 @@ def main():
                 addr = f"127.0.0.1:{port()}"
                 cli(state, "init", "--name", name, "--listen", addr, "--scan-workers", str(args.scan_workers))
                 cli(state, "folder", "add", "bench", str(files))
+                options = {k: getattr(args, k) for k in ("transfer_lanes", "send_cache_mib", "chunk_cache_mib") if getattr(args, k) is not None}
+                config_path = state / "config.json"
+                config = json.loads(config_path.read_text())
+                config.update(options)
+                config_path.write_text(json.dumps(config))
                 devices.append((state, files, addr, cli(state, "id").strip()))
             a, b = devices
             payload = os.urandom(args.size)
@@ -99,6 +107,15 @@ def main():
                           payload_MB_per_second=round(args.files * args.size / duration / 1e6, 2),
                           edit_latency_ms=round((time.monotonic() - start_edit) * 1000, 1),
                           environment="two local daemons, loopback, same filesystem", verified_all_payloads=True)
+            result.update(transfer_lanes=args.transfer_lanes, send_cache_mib=args.send_cache_mib, chunk_cache_mib=args.chunk_cache_mib)
+            # Status snapshots lag by up to one second; wait for committed payload accounting.
+            for _ in range(30):
+                status = json.loads((a[0] / "status.json").read_text())
+                if status.get("sent_bytes", 0) >= args.files * args.size + len(edit):
+                    break
+                time.sleep(.1)
+            result["source_read_bytes"] = status.get("source_read_bytes")
+            result["scan_cache_reused_bytes"] = status.get("scan_cache_reused_bytes")
             print(json.dumps(result, indent=2))
             if args.output:
                 args.output.parent.mkdir(parents=True, exist_ok=True)

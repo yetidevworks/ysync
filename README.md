@@ -2,7 +2,7 @@
 
 Direct, encrypted, bidirectional file synchronization for macOS and Linux. A Rust daemon, a live terminal monitor, explicit device approval, and native user services.
 
-**Status: experimental 0.2.** Use disposable folders or copies while evaluating. This implementation is not yet a proven replacement for Syncthing on a multi-million-file production tree. Do not run two sync engines against the same live folders.
+**Status: experimental 0.3.** Use disposable folders or copies while evaluating. This implementation is not yet a proven replacement for Syncthing on a multi-million-file production tree. Do not run two sync engines against the same live folders.
 
 ## Install
 
@@ -26,13 +26,13 @@ Use Rust/Cargo 1.88 or newer and a C compiler. SQLite is bundled; no separate SQ
 
 ```sh
 cargo install --git https://github.com/yetidevworks/ysync.git \
-  --tag v0.2.6 --locked ysync
+  --tag v0.3.0 --locked ysync
 ysync --version
 ```
 
 Cargo installs the command under `~/.cargo/bin`; make sure that directory is on your PATH. With a rustup installation, `source "$HOME/.cargo/env"` activates it in the current shell. Installation builds the binary but does not start a service or change your sync configuration. This crate is not published to crates.io. Cargo's [Git installation options](https://doc.rust-lang.org/cargo/commands/cargo-install.html) support selecting a tag and using the committed dependency lockfile.
 
-For the latest main branch, replace `--tag v0.2.6` with `--branch main`. To update an installed service: stop it, install the desired tag with `--force`, and start it again. Reinstall the service definition if the binary's installation path changes.
+For the latest main branch, replace `--tag v0.3.0` with `--branch main`. To update an installed service: stop it, install the desired tag with `--force`, and start it again. Reinstall the service definition if the binary's installation path changes.
 
 ### Download a binary
 
@@ -50,13 +50,13 @@ Linux archives require glibc 2.35 or newer. Build with Cargo on older systems. M
 For example, on an Apple Silicon Mac:
 
 ```sh
-curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.2.6/ysync-v0.2.6-aarch64-apple-darwin.tar.gz
-curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.2.6/SHA256SUMS
-shasum -a 256 ysync-v0.2.6-aarch64-apple-darwin.tar.gz
+curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.3.0/ysync-v0.3.0-aarch64-apple-darwin.tar.gz
+curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.3.0/SHA256SUMS
+shasum -a 256 ysync-v0.3.0-aarch64-apple-darwin.tar.gz
 # Compare the result with its matching entry in SHA256SUMS.
-tar -xzf ysync-v0.2.6-aarch64-apple-darwin.tar.gz
+tar -xzf ysync-v0.3.0-aarch64-apple-darwin.tar.gz
 mkdir -p ~/.local/bin
-install -m 755 ysync-v0.2.6-aarch64-apple-darwin/ysync ~/.local/bin/ysync
+install -m 755 ysync-v0.3.0-aarch64-apple-darwin/ysync ~/.local/bin/ysync
 ```
 
 Put `~/.local/bin` on your PATH if you use this location. `ysync --help` shows all commands.
@@ -117,6 +117,39 @@ ysync peer approve MAC_DEVICE_ID --name mac --folder code
 Compare `MAC_DEVICE_ID` with the fingerprint shown on the Mac before approving. Both machines must approve each other, and both must grant the shared folder. The pending connection can exchange only the cryptographic handshake and a rejection; it cannot list or transfer files. Only one side needs an address configured; the resulting session carries changes in both directions.
 
 The default listener is TCP port **39280**, on all IPv4 interfaces. Use `init --listen 127.0.0.1:39280` for a loopback-only instance, or bind a specific LAN/Tailscale address. Allow inbound TCP 39280 on the listening machine. There is no discovery service, relay, or cloud account.
+
+## Review initial pairing (0.3.0)
+
+Normal pairing uses **merge**: identical versions reconcile, new files transfer, and independent differences are preserved as conflicts. When one machine is deliberately the source for an existing copy, use a one-time **seed-local** plan before granting folder access. Seeding establishes a common history; it does not permanently make the folder one-way.
+
+Keep both daemons stopped during enrollment and keep editing applications quiet while preparing/applying a plan. Add the same folder ID on both machines first. On the **receiver**:
+
+```sh
+ysync pairing export code --output ~/code-receiver.sqlite
+```
+
+Export performs a complete bounded scan, aborts on an incomplete scan, and writes metadata only. Copy that file to the source outside all synchronized folders. On the **source**:
+
+```sh
+ysync pairing preview code --receiver ~/code-receiver.sqlite \
+  --mode seed-local --output ~/code-seed.sqlite
+ysync pairing show ~/code-seed.sqlite --limit 50
+ysync pairing show ~/code-seed.sqlite --offset 50 --limit 50
+```
+
+The summary and paginated JSON view show each known receiver path, its source/receiver versions, and the proposed action: adopt history, replace, or delete. Receiver-only included files become deletions when absent on the source. Source-only live files are listed as `send-new`; directory metadata is published before children. Ignored source paths are counted and skipped. A plan with a file/directory type replacement is refused; directories containing ignored or otherwise untransferred children may still require manual review instead of deletion.
+
+To inspect normal merging instead, use `--mode merge` (the default). Its actions show receive, send, identical history, or conflict; it requires no apply step. Approve and connect normally when satisfied with that behavior.
+
+To explicitly apply the reviewed seed on the **source**:
+
+```sh
+ysync pairing apply ~/code-seed.sqlite --seed-local
+```
+
+Apply verifies the source device, folder configuration, index generation, and current contents/stamps of reviewed paths, then commits their new version vectors in one SQLite transaction. A changed source invalidates the plan; prepare a fresh one. Source working files are unchanged. The applied review is retained under the source state directory's `pairing/` directory. Receiver replacements/deletions use the normal durable `.ysync/versions/` archives; existing conflict archives remain retained. When approved peers reconnect, only receiver history included in the exported snapshot is superseded. New receiver edits after export remain protected by conflict detection. The plan is not a policy to overwrite future independent edits automatically.
+
+Export and preview refresh the local index, use the configured scan worker count, and honor the optional scanner thermal limit. They do not transfer payloads or create a full data backup. Keep the exported metadata/plan private; both are created with mode `0600`. Files must be new output paths outside synchronized folders. This workflow does not create application-consistent database snapshots.
 
 ## Monitor and manage
 
@@ -193,6 +226,36 @@ ysync conflict resolve projects FULL_CONFLICT_ID --keep-local
 
 This command does not copy anything over the working file. It records the current local version as a deliberate resolution of the selected incoming version. When synchronization resumes, that decision propagates. To choose incoming content, first review and copy/merge the saved payload into the working file, then run the same explicit resolution command. Archives remain retained. Conflicting edits made after the choice produce a new conflict.
 
+## Archive retention (0.3.0)
+
+Retention is disabled by default. Configure per-folder age/space limits, then inspect a dry run:
+
+```sh
+ysync retention configure --versions-days 30 --versions-max-mib 10240 \
+  --partial-days 7 --resolved-conflicts-days 90
+ysync retention preview --folder code
+```
+
+To clean manually, stop the local daemon, then run:
+
+```sh
+ysync retention clean --folder code --apply
+```
+
+Omit `--folder` to inspect/clean all configured folders. Manual cleanup recomputes eligibility, rechecks each candidate, and skips changed or locked files. It never deletes working paths. The space limit evicts the oldest eligible versions first; the age limit also expires old versions even when below that cap. Limits are independent for each folder. Age uses archive creation time (the version manifest's `saved_at`), and last modification time for partials/conflict manifests. Resolved-conflict age is measured from when the incoming version was archived, not from when it was resolved. Byte totals estimate reclaimable payload bytes, exclude sidecar overhead, and count zero for hard-linked payloads that still have other names.
+
+Automatic cleanup is a separate opt-in:
+
+```sh
+ysync retention configure --automatic
+# Clear all limits and turn automatic cleanup off:
+ysync retention configure --disable
+```
+
+The daemon checks configuration once per minute (starting one minute after startup), runs an enabled policy at most hourly per folder, and retries busy folders on the next check. Policy changes make the next check eligible. Paused folders are skipped. Maintenance uses the folder gate, skips locked active downloads, and reports completed cleanup/errors in activity events.
+
+Unresolved conflicts are never eligible. A conflict archive without a pending database row is eligible only if the indexed version includes both sides' histories; crash-recovery manifests with uncommitted histories remain protected. The cleaner recognizes current version manifests, UUID staging files, resumable `.part` files, and resolved conflict manifests. Unknown, malformed, symlinked, or otherwise unsupported artifacts are preserved. A category with over 100,000 directory entries stops the run before deletion rather than allocating without a bound; very large historical stores currently require manual maintenance. Retention does not cover pairing audit plans or the independent backups made during live reconciliation.
+
 ## Linux watch capacity
 
 `ysync watch-capacity` reports the kernel's per-user watch, instance, and queue limits alongside estimated directory-watch needs from the existing index. `--json` produces a machine-readable report; `--home STATE_DIR` selects an evaluation instance. The report includes paused folders separately so you can size both trees before enabling them. It applies current exclusions to cached directory paths and includes root/control watches. It reads the index without walking source trees, hashing files, or modifying kernel settings.
@@ -259,14 +322,32 @@ Daemon state is separate from synced files:
 
 Use `ysync --home /absolute/path ...` to select another state directory. It contains private device keys, configuration, the SQLite index/cursors, and monitoring snapshots. Keep it outside all synchronized folders.
 
+## Transfer tuning (0.3.0)
+
+Version 0.3.0 uses three encrypted transfer lanes per peer by default: one for metadata and files smaller than 1 MiB, and two for larger files. Small edits can proceed while a bulk lane is busy. Paths stay on a stable bulk lane; each bulk batch carries one payload. Parent metadata must be committed before a bulk file is published. Independent lane cursors retain durable acknowledgment and safe reconnect behavior. Both peers negotiate the smaller configured lane count.
+
+```sh
+ysync init --transfer-lanes 3 --send-cache-mib 64 --chunk-cache-mib 64
+```
+
+Restart both daemons after changing these settings. `--transfer-lanes` accepts 1–8; 1 restores a shared lane. Transfer concurrency is independent of `--scan-workers`. File flushes remain bounded at eight workers per committing batch, and publication is serialized per folder. More lanes are not a promise of more throughput: disk latency, encryption, durable writes and available bandwidth still matter. Empty exchanges back off to a 250 ms interval.
+
+The scan-to-send RAM cache retains up to 64 MiB by default, with an 8 MiB individual-file limit and 16,384-entry cap. It captures bytes during the existing hash pass and only reuses them when the full file fingerprint and indexed hash match. Larger or evicted files use the normal read path. This is a bounded single-read fast path, not a guarantee that every initial file is read once. Active senders and hash workers can temporarily retain an additional file buffer each, up to 8 MiB per worker. `--send-cache-mib 0` disables it; the maximum budget is 1,024 MiB.
+
+Persistent chunk signatures live in `chunk-cache.sqlite` under the private state directory. A full fingerprint, chunk parameters, record checksum and bounded manifest validation protect each lookup; errors fall back to building signatures. The default 64 MiB budget covers serialized signatures, with at most 1,024 records and 2 MiB per record. SQLite pages, WAL and indexes add overhead. A lower budget evicts old entries on the next signature write; it does not shrink previously allocated pages. Disabled caches retain their existing files. Published delta layouts are saved for the next update, including across restarts. Copied chunks and the complete destination are still verified before publication.
+
+Delta selection requires estimated payload reuse to cover signature/plan metadata plus at least 5% of the remaining file or 256 KiB, whichever is larger. An ineffective attempt streams instead and skips delta negotiation for the next three attempts on that peer/path before probing again. `--chunk-cache-mib 0` disables persistent signatures and this history, while retaining the immediate savings check. The maximum budget is 1,024 MiB. Retention settings do not govern these disposable caches.
+
+`status --json` exposes diagnostic counters: `source_read_bytes` counts transfer-side file reads (excluding scanner reads and not physical device I/O), `scan_cache_reused_bytes` counts cached payload selected for send attempts, `signature_cache_hits` and `signature_indexed_bytes` track signature work, and `delta_fallbacks` counts rejected/skipped deltas. These are per-run work counters, not unique committed bytes. The TUI layout is unchanged.
+
 ## How it works
 
 - **Identity and transport:** Noise XX using X25519, ChaCha20-Poly1305, and BLAKE2s through the `snow` implementation. A device ID is the BLAKE3 fingerprint of its static public key. All post-handshake metadata and file content are encrypted and authenticated; outgoing connections pin the approved fingerprint.
-- **Bootstrap:** directory enumeration and hashing publish index batches as they complete. Transfer can begin while the rest of the tree is still being scanned. A bounded Rayon worker pool hashes files in parallel outside the database write transaction. `init --scan-workers 16` sets its size (default: min(cores, 8), maximum 64; restart to change). Metadata is negotiated in batches of up to 128 entries. Payloads are framed over persistent connections; no per-file request/ack round trip.
+- **Bootstrap:** directory enumeration and hashing publish index batches as they complete. Transfer can begin while the rest of the tree is still being scanned. A bounded Rayon worker pool hashes files in parallel outside the database write transaction. `init --scan-workers 16` sets its size (default: min(cores, 8), maximum 64; restart to change). Metadata is negotiated in batches of up to 128 entries. Small-file payloads are framed in batches over persistent connections without a per-file request/ack round trip; bulk lanes acknowledge one file per batch.
 - **Index:** SQLite WAL, indexed change sequences, batched transactions, and persistent per-peer cursors. Reconnects request only newer indexed versions. File metadata caches avoid rehashing unchanged files during ordinary reconciliation. File durability flushes use up to eight concurrent workers; affected directories are flushed once per batch.
 - **Interrupted transfers:** receive buffers survive a disconnected session or daemon restart. They are scoped to the sending device, relative path, size, and content hash. Both endpoints hash the retained prefix before the sender skips it; a mismatch restarts that file from zero. Prefix verification uses bounded memory and liveness messages during long reads. The receiver still verifies the complete file before publication. This saves network traffic but reads the retained prefix on both disks. Resume progress is best effort across power loss; every surviving prefix must pass verification. The monitor's `RESUME` total and JSON `resumed_bytes` count verified bytes reused during receive attempts in this daemon run, not committed destination bytes.
 - **Delta transfers:** when at least 1 MiB remains and the destination already has a regular file of at least 1 MiB, both versions are divided into content-defined chunks. Gear hashing selects boundaries; BLAKE3 identifies matching bytes even after insertions or deletions shift their offsets. The receiver copies matching chunks from its existing file into a separate staging file, and the sender streams the missing chunks without a per-chunk round trip. Every copied/literal chunk and the complete assembled file are verified. Missing or unstable basis files during negotiation fall back to streaming; a basis that changes during copying fails verification and reconnects. The existing destination remains intact until publication. Delta assembly also supports prefix resume after interruption.
-- **Delta resource limits:** signatures and plans contain at most 8,192 chunks per file, and streaming/copy buffers are bounded at 256 KiB. Chunks use a 16–256 KiB range at the smallest setting; their size increases for larger files to keep metadata bounded. Only the active delta's basis descriptor and manifests are held. Chunk indexes are built on demand, so delta savings cost an extra scan of both versions plus rereading literal source chunks. Initial transfers and small files use the existing streaming path. The monitor's `DELTA` total and JSON `delta_reused_bytes` report verified local bytes reused during receive attempts, excluding signature/plan traffic and without implying those attempts committed.
+- **Delta resource limits:** signatures and plans contain at most 8,192 chunks per file, and streaming/copy buffers are bounded at 256 KiB. Chunks use a 16–256 KiB range at the smallest setting; their size increases for larger files to keep metadata bounded. Each active lane holds bounded basis/plan metadata. Chunk indexes are built on cache misses; unchanged fingerprints reuse persistent signatures. A miss costs an extra scan plus any literal source reads. Initial transfers and small files stream from the scan cache when available, otherwise from disk. The monitor's `DELTA` total and JSON `delta_reused_bytes` report verified local bytes reused during receive attempts, excluding signature/plan traffic and without implying those attempts committed.
 - **Watching:** native FSEvents on macOS and inotify on Linux via `notify`. Linux registers individual included directories during scanning, before listing their children, and excludes ignored subtrees and internal staging/version directories. One additional control watch observes the folder marker. Directory moves/removals update those registrations; macOS uses a recursive root stream and filters ignored paths in the callback.
 - **Event scheduling:** callbacks do no filesystem reads or hashing. They filter read/open events and ignored paths, retain close-after-write events, and coalesce paths into a bounded 4,096-path set with a one-slot wake signal. Updates wait for 100 ms of quiet, with a one-second maximum batching delay under continuous activity. An ancestor subtree event absorbs queued descendant events. Directory metadata events inspect only the directory entry; file/directory deletion and rename reconcile only affected path ranges in the index, with child tombstones before parent tombstones. Unchanged metadata fingerprints reuse cached hashes, including notifications caused by incoming writes.
 - **Reconciliation and recovery:** startup, explicit ignore-rule changes, missed-event/overflow signals, and the periodic safety interval trigger full reconciliation. Overflow discards the bounded event set in favor of one repair scan and reestablishes native coverage. Unreadable/unsupported paths are reported while accessible files continue indexing; deletion inference is suspended after an incomplete scan. Scoped failures get up to three bounded retries. Watch registration failures fall back to polling and retry with backoff; successful reattachment performs a full reconciliation. Pausing a folder releases its native watcher. Cached roots and ignore matchers avoid rebuilding them during idle wakeups.
@@ -283,7 +364,7 @@ Not implemented yet:
 
 - Cross-file deduplication, compression, multiple bulk lanes, or persistent chunk indexes. Delta reuse is limited to the existing destination at the same relative path; unrelated data and files without an eligible basis stream in full. An interruption during batch publication can still require retransmitting files already moved out of the staging area.
 - Single-read bootstrap: the first version hashes a source file when indexing, then reads and verifies it while transmitting. The index/transfer stages overlap, but this still reads source bytes twice.
-- mDNS/global discovery, NAT traversal/relays, web/mobile interfaces, rate schedules, bandwidth caps, folder invitation UI, or automatic version retention policies.
+- mDNS/global discovery, NAT traversal/relays, web/mobile interfaces, rate schedules, bandwidth caps, folder invitation UI. Configurable archive retention is implemented in the unreleased development build.
 - POSIX owners/groups, ACLs, extended attributes/resource forks, hard-link identity, sparse extents, modification-time preservation, non-UTF-8 filenames, or application-consistent snapshots.
 - Automated file/directory type-conflict resolution when a directory must be replaced. These are reported for manual resolution to avoid deleting a populated subtree.
 
@@ -305,7 +386,7 @@ The benchmark creates two isolated local instances and reports bootstrap duratio
 
 Run `cargo bench --bench delta --locked` for the synthetic content-defined versus fixed-block comparison, or add `--delta --files 1 --size 33554432` to the SSH benchmark for a 32 MiB test file with three edits.
 
-See [ROADMAP.md](ROADMAP.md) for upcoming performance and operational work. The delta-transfer build uses **wire protocol 4**; update both peers together. Earlier protocol versions are rejected before exchanging transfer batches. Identities, configuration, indexed versions, and partial buffers are retained; a pending-conflicts table is added. Upgrade both devices before reconnecting. Protocol 3 peers (0.1.x) are refused before exchanging batches so their automatic conflict policy cannot participate.
+See [ROADMAP.md](ROADMAP.md) for upcoming performance and operational work. The 0.3.0 transfer-lane build uses **wire protocol 5**; update both peers together. Earlier protocol versions are rejected before exchanging transfer batches. Identities, configuration, indexed versions, and partial buffers are retained; lane cursors and partial change indexes are added. The first upgraded startup builds those indexes over the existing entries. Upgrade both devices before reconnecting. Protocol 3 peers (0.1.x) are refused before exchanging batches so their automatic conflict policy cannot participate.
 
 ## License
 

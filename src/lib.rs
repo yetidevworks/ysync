@@ -15,3 +15,12 @@ mod watching;
 pub mod scanning;
 
 pub mod capacity;
+
+pub mod pairing;
+pub mod retention;
+
+pub mod lanes;
+
+pub mod read_cache;
+
+pub mod chunk_cache;

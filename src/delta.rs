@@ -166,6 +166,18 @@ pub fn plan(source: &[Block], basis: &[Block]) -> Vec<Operation> {
         })
         .collect()
 }
+/// Savings must cover metadata plus a useful amount of payload before paying delta assembly costs.
+pub fn worthwhile(ops: &[Operation], size: u64, basis_metadata: usize) -> bool {
+    let reused = ops
+        .iter()
+        .filter(|op| op.basis_offset.is_some())
+        .map(|op| op.len)
+        .sum::<u64>();
+    let metadata =
+        basis_metadata as u64 + serde_json::to_vec(ops).map_or(u64::MAX / 2, |v| v.len() as u64);
+    reused >= metadata.saturating_add((size / 20).max(256 * 1024))
+}
+
 pub fn validate_plan(
     ops: &[Operation],
     remaining: u64,
@@ -401,5 +413,24 @@ mod tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    #[test]
+    fn selection_requires_savings_after_metadata_cost() {
+        let mut ops = vec![Operation {
+            len: 1024 * 1024,
+            hash: "ab".repeat(32),
+            basis_offset: None,
+        }];
+        assert!(!worthwhile(&ops, 16 * 1024 * 1024, 4096));
+        ops[0].basis_offset = Some(0);
+        assert!(worthwhile(&ops, 16 * 1024 * 1024, 4096));
+        assert!(!worthwhile(&ops, 16 * 1024 * 1024, 512 * 1024));
+        ops[0].len = 128 * 1024;
+        assert!(!worthwhile(&ops, 1024 * 1024, 1));
     }
 }

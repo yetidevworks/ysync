@@ -27,6 +27,7 @@ pub struct Root {
     pub hashed_files: AtomicU64,
     pub hashed_bytes: AtomicU64,
     pub scan_control: Option<Arc<crate::scanning::ScanControl>>,
+    pub read_cache: Option<Arc<crate::read_cache::ReadCache>>,
 }
 impl Root {
     pub fn open(folder: Folder, gate: Arc<Mutex<()>>) -> Result<Self> {
@@ -58,6 +59,7 @@ impl Root {
             hashed_files: AtomicU64::new(0),
             hashed_bytes: AtomicU64::new(0),
             scan_control: None,
+            read_cache: None,
         })
     }
     fn scan_checkpoint(&self) -> Result<()> {
@@ -136,10 +138,20 @@ pub fn stamp(m: &Metadata) -> String {
         m.ctime_nsec()
     )
 }
+#[cfg(test)]
 fn hash_reader(reader: &mut impl Read, root: &Root) -> Result<(String, u64)> {
+    let (hash, bytes, _) = hash_collect(reader, root, None)?;
+    Ok((hash, bytes))
+}
+fn hash_collect(
+    reader: &mut impl Read,
+    root: &Root,
+    limit: Option<usize>,
+) -> Result<(String, u64, Option<Vec<u8>>)> {
     let mut h = blake3::Hasher::new();
     let mut bytes = 0;
     let mut buf = [0u8; 262144];
+    let mut captured = limit.map(Vec::with_capacity);
     loop {
         root.scan_checkpoint()?;
         let n = reader.read(&mut buf)?;
@@ -148,8 +160,15 @@ fn hash_reader(reader: &mut impl Read, root: &Root) -> Result<(String, u64)> {
         }
         h.update(&buf[..n]);
         bytes += n as u64;
+        if let Some(data) = &mut captured {
+            if data.len() + n <= limit.unwrap() {
+                data.extend_from_slice(&buf[..n]);
+            } else {
+                captured = None;
+            }
+        }
     }
-    Ok((h.finalize().to_hex().to_string(), bytes))
+    Ok((h.finalize().to_hex().to_string(), bytes, captured))
 }
 pub fn observe(root: &Root, path: &str, old: Option<&Entry>, force: bool) -> Result<Option<Entry>> {
     root.scan_checkpoint()?;
@@ -196,11 +215,19 @@ pub fn observe(root: &Root, path: &str, old: Option<&Entry>, force: bool) -> Res
         if before != st {
             bail!("file changed before hashing: {path}");
         }
-        let (hash, bytes) = hash_reader(&mut f, root)?;
+        let capture = root
+            .read_cache
+            .as_ref()
+            .filter(|c| c.allows(meta.len()))
+            .map(|_| meta.len() as usize);
+        let (hash, bytes, captured) = hash_collect(&mut f, root, capture)?;
         root.hashed_files.fetch_add(1, Ordering::Relaxed);
         root.hashed_bytes.fetch_add(bytes, Ordering::Relaxed);
         if stamp(&f.metadata()?) != before || stamp(&root.dir.symlink_metadata(path)?) != before {
             bail!("file changed during hashing: {path}");
+        }
+        if let (Some(cache), Some(bytes)) = (&root.read_cache, captured) {
+            cache.insert(&root.folder.id, path, &st, &hash, bytes);
         }
         (Kind::File, meta.len(), hash, None)
     } else {

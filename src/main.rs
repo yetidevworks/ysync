@@ -25,6 +25,15 @@ enum Cmd {
         listen: Option<String>,
         #[arg(long, value_parser=clap::value_parser!(u8).range(1..=64),help="Bounded scanner/hash worker pool; defaults to min(cores, 8)")]
         scan_workers: Option<u8>,
+        /// Total transfer lanes: one small-file lane and the remainder bulk lanes. Restart both peers after changes.
+        #[arg(long, value_parser=clap::value_parser!(u8).range(1..=8))]
+        transfer_lanes: Option<u8>,
+        /// RAM scan-to-send cache in MiB (0 disables; files above 8 MiB stream normally).
+        #[arg(long, value_parser=clap::value_parser!(u16).range(0..=1024))]
+        send_cache_mib: Option<u16>,
+        /// Persistent delta signature budget in MiB (0 disables caching and adaptive history).
+        #[arg(long, value_parser=clap::value_parser!(u16).range(0..=1024))]
+        chunk_cache_mib: Option<u16>,
         #[arg(long, value_parser=clap::value_parser!(u64).range(5..), help="Periodic full reconciliation interval; default 3600 seconds, applies live")]
         rescan_secs: Option<u64>,
         #[arg(long, value_parser=clap::value_parser!(u8).range(40..=95), conflicts_with="disable_scan_thermal_limit", help="Linux CPU temperature to pause scanning; resumes 5 C cooler; applies live")]
@@ -57,6 +66,16 @@ enum Cmd {
         #[command(subcommand)]
         command: ConflictCmd,
     },
+    /// Preview normal pairing or explicitly seed a receiver from this device.
+    Pairing {
+        #[command(subcommand)]
+        command: PairingCmd,
+    },
+    /// Preview or configure archive cleanup. Unresolved conflicts are always protected.
+    Retention {
+        #[command(subcommand)]
+        command: RetentionCmd,
+    },
     /// Manage synchronized folders. IDs must match on both devices.
     Folder {
         #[command(subcommand)]
@@ -71,6 +90,70 @@ enum Cmd {
     Service {
         #[command(subcommand)]
         command: ServiceCmd,
+    },
+}
+#[derive(Subcommand)]
+enum PairingCmd {
+    /// Scan and export receiver metadata before granting access. Stop the daemon first.
+    Export {
+        folder: String,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Scan the source and write a reviewable plan; working files are unchanged.
+    Preview {
+        folder: String,
+        #[arg(long)]
+        receiver: PathBuf,
+        #[arg(long, default_value="merge", value_parser=["merge","seed-local"])]
+        mode: String,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Show paths, actions and both versions from a saved plan.
+    Show {
+        plan: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        offset: u64,
+        #[arg(long, default_value_t=50, value_parser=clap::value_parser!(u16).range(1..=1000))]
+        limit: u16,
+    },
+    /// Publish the reviewed source baseline. Stop the source daemon first.
+    Apply {
+        plan: PathBuf,
+        #[arg(long, required = true)]
+        seed_local: bool,
+    },
+}
+#[derive(Subcommand)]
+enum RetentionCmd {
+    /// List eligible archives and estimated reclaimable payload bytes. Does not delete files.
+    Preview {
+        #[arg(long)]
+        folder: Option<String>,
+    },
+    /// Remove eligible archives under the current policy. Stop the daemon first.
+    Clean {
+        #[arg(long)]
+        folder: Option<String>,
+        #[arg(long, required = true)]
+        apply: bool,
+    },
+    /// Set retention limits (per folder). Automatic cleanup is separately opt-in.
+    Configure {
+        #[arg(long, value_parser=clap::value_parser!(u32).range(1..))]
+        versions_days: Option<u32>,
+        #[arg(long)]
+        versions_max_mib: Option<u64>,
+        #[arg(long, value_parser=clap::value_parser!(u32).range(1..))]
+        partial_days: Option<u32>,
+        #[arg(long, value_parser=clap::value_parser!(u32).range(1..))]
+        resolved_conflicts_days: Option<u32>,
+        #[arg(long, conflicts_with = "disable")]
+        automatic: bool,
+        /// Clear all limits and disable automatic cleanup.
+        #[arg(long)]
+        disable: bool,
     },
 }
 #[derive(Subcommand)]
@@ -152,6 +235,9 @@ fn main() -> Result<()> {
             name,
             listen,
             scan_workers,
+            transfer_lanes,
+            send_cache_mib,
+            chunk_cache_mib,
             rescan_secs,
             scan_max_temp_c,
             disable_scan_thermal_limit,
@@ -160,6 +246,20 @@ fn main() -> Result<()> {
             if let Some(workers) = scan_workers {
                 config::edit(&home, |c| {
                     c.scan_workers = workers as usize;
+                    Ok(())
+                })?;
+            }
+            if transfer_lanes.is_some() || send_cache_mib.is_some() || chunk_cache_mib.is_some() {
+                config::edit(&home, |c| {
+                    if let Some(v) = transfer_lanes {
+                        c.transfer_lanes = v;
+                    }
+                    if let Some(v) = send_cache_mib {
+                        c.send_cache_mib = v;
+                    }
+                    if let Some(v) = chunk_cache_mib {
+                        c.chunk_cache_mib = v;
+                    }
                     Ok(())
                 })?;
             }
@@ -205,6 +305,106 @@ fn main() -> Result<()> {
                 );
             }
             ConflictCmd::Resolve { .. } => bail!("explicit --keep-local is required"),
+        },
+        Cmd::Pairing { command } => match command {
+            PairingCmd::Export { folder, output } => {
+                ysync::pairing::export(&home, &folder, &output)?;
+                println!(
+                    "Receiver metadata exported to {}. Copy it to the source to preview pairing.",
+                    output.display()
+                );
+            }
+            PairingCmd::Preview {
+                folder,
+                receiver,
+                mode,
+                output,
+            } => {
+                let summary = ysync::pairing::preview(&home, &folder, &receiver, &mode, &output)?;
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+                println!(
+                    "Plan: {}. Merge uses normal approval; seed-local requires an explicit apply. Receiver replacements/deletions retain file versions.",
+                    output.display()
+                );
+            }
+            PairingCmd::Show {
+                plan,
+                offset,
+                limit,
+            } => println!(
+                "{}",
+                serde_json::to_string_pretty(&ysync::pairing::show(&plan, offset, limit)?)?
+            ),
+            PairingCmd::Apply {
+                plan,
+                seed_local: true,
+            } => {
+                let n = ysync::pairing::apply(&home, &plan)?;
+                println!(
+                    "Published {n} reviewed baselines. Approve/connect the devices to transfer. Source working files were not changed."
+                );
+            }
+            PairingCmd::Apply { .. } => bail!("explicit --seed-local is required"),
+        },
+        Cmd::Retention { command } => match command {
+            RetentionCmd::Preview { folder } => println!(
+                "{}",
+                serde_json::to_string_pretty(&ysync::retention::command(
+                    &home,
+                    folder.as_deref(),
+                    false
+                )?)?
+            ),
+            RetentionCmd::Clean {
+                folder,
+                apply: true,
+            } => println!(
+                "{}",
+                serde_json::to_string_pretty(&ysync::retention::command(
+                    &home,
+                    folder.as_deref(),
+                    true
+                )?)?
+            ),
+            RetentionCmd::Clean { .. } => bail!("explicit --apply is required"),
+            RetentionCmd::Configure {
+                versions_days,
+                versions_max_mib,
+                partial_days,
+                resolved_conflicts_days,
+                automatic,
+                disable,
+            } => {
+                config::edit(&home, |c| {
+                    if disable {
+                        c.retention = Default::default();
+                    } else {
+                        if let Some(v) = versions_days {
+                            c.retention.versions_days = Some(v);
+                        }
+                        if let Some(v) = versions_max_mib {
+                            c.retention.versions_max_bytes = Some(
+                                v.checked_mul(1024 * 1024)
+                                    .ok_or_else(|| anyhow::anyhow!("size limit too large"))?,
+                            );
+                        }
+                        if let Some(v) = partial_days {
+                            c.retention.partial_days = Some(v);
+                        }
+                        if let Some(v) = resolved_conflicts_days {
+                            c.retention.resolved_conflicts_days = Some(v);
+                        }
+                        if automatic {
+                            c.retention.automatic = true;
+                        }
+                    }
+                    Ok(())
+                })?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&config::load(&home)?.retention)?
+                );
+            }
         },
         Cmd::Serve => daemon::serve(&home)?,
         Cmd::Monitor { plain } => {
