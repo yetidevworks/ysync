@@ -81,6 +81,8 @@ pub struct Event {
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Status {
     #[serde(default)]
+    pub delivery: crate::progress::Deliveries,
+    #[serde(default)]
     pub daemon_version: String,
     pub pid: u32,
     pub started: u64,
@@ -117,6 +119,7 @@ pub struct Status {
     pub events: VecDeque<Event>,
 }
 pub struct Shared {
+    pub delivery: crate::progress::Tracker,
     pub home: PathBuf,
     pub id: String,
     pub read_cache: Arc<crate::read_cache::ReadCache>,
@@ -140,6 +143,7 @@ pub struct Shared {
 impl Shared {
     pub(crate) fn new(home: &Path, id: String, listen: String) -> Self {
         Self {
+            delivery: Default::default(),
             home: home.to_owned(),
             read_cache: Arc::new(crate::read_cache::ReadCache::new(
                 config::load(home).map_or(0, |c| c.send_cache_mib),
@@ -298,6 +302,7 @@ impl Shared {
         self.lane_counts.lock().unwrap().insert(id.into(), count);
     }
     pub fn connected(&self, id: &str, lane: u8, connected: bool) {
+        self.delivery.connected(id, lane, connected);
         let mut connections = self.connections.lock().unwrap();
         if connected {
             connections.insert((id.into(), lane));
@@ -853,6 +858,10 @@ pub fn serve(home: &Path) -> Result<()> {
     let mut workers = Vec::new();
     {
         let s = shared.clone();
+        workers.push(thread::spawn(move || crate::progress::run(s)));
+    }
+    {
+        let s = shared.clone();
         workers.push(thread::spawn(move || retention_worker(s)));
     }
     let mut tick = Instant::now() - Duration::from_secs(2);
@@ -987,7 +996,9 @@ pub fn serve(home: &Path) -> Result<()> {
                 .map(|(id, c)| (id.clone(), c.waiting()))
                 .collect();
             let conflict_counts = crate::conflicts::counts(&status_db).ok();
+            let delivery = shared.delivery.snapshot();
             let mut status = shared.status.lock().unwrap();
+            status.delivery = delivery;
             status.thermal = thermal.clone();
             status.watch_limits = crate::capacity::limits();
             for (id, f) in &mut status.folders {

@@ -1113,6 +1113,20 @@ fn small_lane_progresses_while_bulk_is_blocked_then_layouts_can_change() {
         equals(&b, "private/edit.txt", b"small edit bypasses blocked bulk")
     });
     assert!(!b.path("private/bulk.bin").exists());
+    wait(
+        "blocked bulk remains visible in delivery queue",
+        &a,
+        &b,
+        || {
+            ysync::daemon::read_status(a.state.path()).is_ok_and(|s| {
+                s.delivery
+                    .get(&b.id)
+                    .and_then(|f| f.get("code"))
+                    .and_then(|d| d.pending.as_ref())
+                    .is_some_and(|p| p.files >= 1 && p.bytes >= data.len() as u64)
+            })
+        },
+    );
     assert_eq!(
         fs::metadata(b.path("private"))
             .unwrap()
@@ -1129,6 +1143,22 @@ fn small_lane_progresses_while_bulk_is_blocked_then_layouts_can_change() {
     wait("scan bytes reused by sender", &a, &b, || {
         ysync::daemon::read_status(a.state.path())
             .is_ok_and(|s| s.scan_cache_reused_bytes >= data.len() as u64)
+    });
+    wait("all lanes acknowledge delivery", &a, &b, || {
+        ysync::daemon::read_status(a.state.path()).is_ok_and(|s| {
+            s.delivery
+                .get(&b.id)
+                .and_then(|f| f.get("code"))
+                .is_some_and(|d| {
+                    d.active_lanes == 3
+                        && d.pending
+                            .as_ref()
+                            .is_some_and(|p| p.complete && p.entries == 0)
+                        && d.acknowledged
+                            .iter()
+                            .all(|n| n.is_some_and(|n| n >= d.local_head))
+                })
+        })
     });
     for count in [1, 2, 3] {
         a.stop();

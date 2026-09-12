@@ -640,6 +640,33 @@ impl Dashboard {
                     ))
                     .fg(CYAN),
                 );
+                if let Some(cfg) = &self.config {
+                    for peer in cfg.peers.iter().filter(|p| p.folders.contains(id)) {
+                        let sample = s.delivery.get(&peer.id).and_then(|folders| folders.get(id));
+                        let (label, color) = delivery_label(
+                            sample,
+                            f,
+                            peer.approved,
+                            self.live() && s.connected_peers.contains(&peer.id),
+                            self.observed_at,
+                        );
+                        lines.push(
+                            Line::from(format!("To {} · {label}", clean(&peer.name))).fg(color),
+                        );
+                        if self.expanded {
+                            if let Some(sample) = sample {
+                                lines.push(Line::from(format!("Queue sampled {} ago · {}/{} lanes observed · local revision {}",
+                                    age(self.observed_at.saturating_sub(sample.sampled_at)),
+                                    sample.acknowledged.iter().flatten().count(), sample.acknowledged.len(), sample.local_head)).fg(MUTED));
+                                if let Some(error) = &sample.error {
+                                    lines.push(Line::from(clean(error)).fg(RED));
+                                }
+                            }
+                            lines.push(Line::from("Queued bytes are full file sizes, before delta/resume savings.").fg(MUTED));
+                            lines.push(Line::from("Delivery confirms indexed changes were reconciled; remote edits/conflicts may remain.").fg(MUTED));
+                        }
+                    }
+                }
                 lines.push(Line::from(format!(
                     "{} watches · {} queued · {} uncovered · {} overflows",
                     count(f.native_watches as u64),
@@ -926,10 +953,172 @@ pub fn run(home: &Path) -> Result<()> {
     Ok(())
 }
 
+fn delivery_label(
+    sample: Option<&crate::progress::Delivery>,
+    folder: &daemon::FolderStatus,
+    approved: bool,
+    connected: bool,
+    observed_at: u64,
+) -> (String, Color) {
+    if !approved {
+        return ("approval needed".into(), AMBER);
+    }
+    if !connected {
+        return ("offline · delivery unconfirmed".into(), MUTED);
+    }
+    let Some(sample) = sample else {
+        return ("awaiting delivery status".into(), MUTED);
+    };
+    if sample.error.is_some() {
+        return ("queue unavailable · d for details".into(), RED);
+    }
+    if observed_at.saturating_sub(sample.sampled_at) > 15 {
+        return ("queue sample stale".into(), AMBER);
+    }
+    let Some(pending) = &sample.pending else {
+        return ("checking delivery".into(), AMBER);
+    };
+    if pending.entries > 0 || !pending.complete {
+        let prefix = if pending.complete { "" } else { "≥ " };
+        return (
+            format!(
+                "{prefix}{} files · {prefix}{} queued · {prefix}{} metadata",
+                count(pending.files),
+                bytes(pending.bytes as f64),
+                count(pending.entries.saturating_sub(pending.files))
+            ),
+            CYAN,
+        );
+    }
+    if sample.active_lanes < sample.acknowledged.len() {
+        return ("waiting for transfer lanes".into(), AMBER);
+    }
+    if sample.acknowledged.is_empty()
+        || sample
+            .acknowledged
+            .iter()
+            .any(|n| n.is_none_or(|n| n < sample.local_head))
+    {
+        return ("reconciling index".into(), CYAN);
+    }
+    if folder.pending_conflicts > 0 {
+        return ("index delivered · conflicts remain".into(), AMBER);
+    }
+    if folder.phase != "watching"
+        || folder.queued_paths > 0
+        || folder.error.is_some()
+        || folder.watch_error.is_some()
+        || folder.unwatched_subtrees > 0
+        || folder.scan_waiting_for_cooling
+    {
+        return ("index delivered · scan pending".into(), AMBER);
+    }
+    ("indexed changes delivered".into(), GREEN)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
+    #[test]
+    fn delivery_never_confuses_scanning_conflicts_or_disconnection_with_delivery() {
+        let mut folder = daemon::FolderStatus {
+            phase: "watching".into(),
+            ..Default::default()
+        };
+        let mut sample = crate::progress::Delivery {
+            active_lanes: 3,
+            sampled_at: 100,
+            local_head: 42,
+            acknowledged: vec![Some(42); 3],
+            pending: Some(crate::progress::Pending {
+                complete: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            delivery_label(Some(&sample), &folder, true, true, 100).1,
+            GREEN
+        );
+        assert_ne!(
+            delivery_label(Some(&sample), &folder, true, false, 100).1,
+            GREEN
+        );
+        assert_ne!(
+            delivery_label(Some(&sample), &folder, true, true, 116).1,
+            GREEN
+        );
+        folder.queued_paths = 1;
+        assert!(
+            delivery_label(Some(&sample), &folder, true, true, 100)
+                .0
+                .contains("scan pending")
+        );
+        folder.queued_paths = 0;
+        folder.pending_conflicts = 2;
+        assert!(
+            delivery_label(Some(&sample), &folder, true, true, 100)
+                .0
+                .contains("conflicts")
+        );
+        folder.pending_conflicts = 0;
+        sample.active_lanes = 2;
+        assert!(
+            delivery_label(Some(&sample), &folder, true, true, 100)
+                .0
+                .contains("waiting")
+        );
+        sample.active_lanes = 3;
+        sample.acknowledged[1] = Some(1);
+        assert!(
+            delivery_label(Some(&sample), &folder, true, true, 100)
+                .0
+                .contains("reconciling")
+        );
+        sample.pending.as_mut().unwrap().complete = false;
+        assert!(
+            delivery_label(Some(&sample), &folder, true, true, 100)
+                .0
+                .contains("≥")
+        );
+    }
+    #[test]
+    fn selected_folder_delivery_is_visible_in_wide_and_expanded_narrow_layouts() {
+        let mut app = sample();
+        app.config.as_mut().unwrap().peers.push(config::Peer {
+            id: "peer".into(),
+            name: "home-omarchy".into(),
+            address: None,
+            approved: true,
+            folders: vec!["trilbymedia".into()],
+        });
+        let status = app.status.as_mut().unwrap();
+        status.connected_peers.push("peer".into());
+        status.delivery.entry("peer".into()).or_default().insert(
+            "trilbymedia".into(),
+            crate::progress::Delivery {
+                sampled_at: 100,
+                active_lanes: 3,
+                acknowledged: vec![Some(1); 3],
+                local_head: 4,
+                pending: Some(crate::progress::Pending {
+                    entries: 3,
+                    files: 2,
+                    bytes: 2_000_000,
+                    complete: true,
+                }),
+                ..Default::default()
+            },
+        );
+        let wide = render(&mut app, 140, 42);
+        assert!(wide.contains("To home-omarchy"));
+        assert!(wide.contains("2 files · 2.00 MB queued"));
+        app.expanded = true;
+        let narrow = render(&mut app, 80, 24);
+        assert!(narrow.contains("To home-omarchy"));
+        assert!(narrow.contains("2 files · 2.00 MB queued"));
+    }
     fn sample() -> Dashboard {
         let mut app = Dashboard {
             observed_at: 100,

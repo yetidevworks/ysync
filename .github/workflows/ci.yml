@@ -36,6 +36,14 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
       - run: python3 scripts/check_monitor_pty.py --binary target/debug/ysync
+      - name: Enable isolated runner user manager
+        if: runner.os == 'Linux'
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$(id -u).service"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+      - name: User service lifecycle and restart replication
+        run: python3 scripts/check_service_lifecycle.py --binary target/debug/ysync --cycles 3
   msrv:
     runs-on: ubuntu-22.04
     timeout-minutes: 15

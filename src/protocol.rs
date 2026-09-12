@@ -702,7 +702,10 @@ fn send_batch(w: &mut Wire, shared: &Shared, folder: &str, after: u64) -> Result
         .recv_prepared()
         .with_context(|| format!("waiting for {folder} batch {upto} durable acknowledgement"))?
     {
-        Message::Ack { upto: n } if n == upto => Ok(n),
+        Message::Ack { upto: n } if n == upto => {
+            shared.delivery.acknowledged(&w.peer, folder, w.lane, n);
+            Ok(n)
+        }
         _ => bail!("batch not acknowledged"),
     }
 }
@@ -1094,6 +1097,7 @@ pub fn session_lane(
         bail!("transfer lane already connected");
     };
     shared.connected(&peer, lane.index, true);
+    shared.delivery.forget_lane(&peer, lane);
     let result = (|| -> Result<()> {
         w.send(&hello(&shared, &peer, lane)?)?;
         let (remote_folders, mut remote_cursors) = match w.recv()? {
@@ -1115,6 +1119,14 @@ pub fn session_lane(
             .filter(|f| remote_folders.contains(f))
             .collect();
         folders.sort();
+        for folder in &folders {
+            shared.delivery.acknowledged(
+                &peer,
+                folder,
+                lane,
+                *remote_cursors.get(folder).unwrap_or(&0),
+            );
+        }
         if folders.is_empty() {
             bail!("no approved, scanned folders in common");
         }

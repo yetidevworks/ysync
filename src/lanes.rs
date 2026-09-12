@@ -22,17 +22,16 @@ impl Lane {
         Ok(())
     }
     pub fn includes(self, e: &Entry) -> bool {
-        if self.count == 1 {
-            return true;
+        self.index == Self::for_file(&e.path, e.kind == Kind::File, e.size, self.count)
+    }
+    pub(crate) fn for_file(path: &str, is_file: bool, size: u64, count: u8) -> u8 {
+        if count == 1 || !is_file || size < BULK_BYTES {
+            return 0;
         }
-        if e.kind != Kind::File || e.size < BULK_BYTES {
-            return self.index == 0;
-        }
-        self.index
-            == 1 + (u64::from_le_bytes(
-                blake3::hash(e.path.as_bytes()).as_bytes()[..8]
-                    .try_into()
-                    .unwrap(),
-            ) % u64::from(self.count - 1)) as u8
+        1 + (u64::from_le_bytes(
+            blake3::hash(path.as_bytes()).as_bytes()[..8]
+                .try_into()
+                .unwrap(),
+        ) % u64::from(count - 1)) as u8
     }
 }

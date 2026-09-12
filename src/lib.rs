@@ -6,6 +6,7 @@ mod durability;
 pub mod engine;
 pub mod model;
 pub mod monitor;
+pub mod progress;
 pub mod protocol;
 pub mod service;
 pub mod store;

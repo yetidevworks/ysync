@@ -18,6 +18,7 @@
 - [x] Conflict safety: preserve working content for independent/concurrent versions, retain durable pending conflicts, require explicit CLI resolution, and refuse peers using the older automatic conflict policy.
 
 - [x] Ratatui monitoring and guarded conflict review with verified previews and explicit keep-local confirmation (0.2.5–0.2.6).
+- [x] Per-peer outbound delivery in the TUI: lane acknowledgements, bounded queue counts, and explicit offline/scanning/conflict states. Counts are logical indexed versions; remote scan/conflict state is not certified.
 - [x] Initial pairing workflow: receiver metadata export, merge/seed-local preview, paginated plan inspection, and atomic explicit source baselines (0.3.2). No permanent one-way mode; new independent receiver edits remain protected.
 - [x] Retention controls: dry runs, age/space limits, manual cleanup, and separately opt-in automatic maintenance. Unresolved/uncommitted conflicts and locked partials are protected (0.3.2). Very large archive directories and unsupported legacy artifacts still require manual maintenance.
 
@@ -33,11 +34,11 @@ Temperature-aware scanner pause/resume is implemented and covered by controlled 
 ## Operational work
 
 - Improve retention of unsupported/legacy artifacts and add bounded pagination for archive stores exceeding 100,000 directory entries.
-- Monitoring polish: automatic conflict-list refresh, grouping by path/version, and per-peer convergence/backlog.
+- Monitoring polish: automatic conflict-list refresh, grouping by path/version, and exchange of remote scan/conflict state for a combined bidirectional convergence indicator.
 - Application-consistent snapshots for live databases.
 - Long-running large-tree evaluation, Linux watch-capacity planning, unreadable-file handling, persistent event-history recovery where supported, and hash reuse across renames.
-- Deeper monitoring of per-peer backlog and progress within a single large-file hash.
-- Test service install/uninstall and reboot/login behavior on both platforms.
+- Progress within a single large-file hash and active lane/cache details.
+- Native user-service lifecycle and repeated restart/replication tests now run with isolated jobs in CI. Actual reboot/logout trials, longer soak tests, and Homebrew-specific lifecycle automation remain.
 - Metadata fidelity, file/directory conflict handling, discovery, and a web interface.
 
 ## Evaluation gate
