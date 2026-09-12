@@ -1,0 +1,188 @@
+{
+  "version": "0.3.2",
+  "date": "2026-09-12",
+  "release": "https://github.com/yetidevworks/ysync/releases/tag/v0.3.2",
+  "source_commit": "d8869f14b0cc97d5d2a11cc487d9416530a2ceed",
+  "installed_via": "Homebrew on both machines",
+  "live_probes": {
+    "token": "ysync-032-check-947754dbc30f",
+    "checks": [
+      {
+        "name": "grav Mac -> Linux",
+        "seconds": 2.546
+      },
+      {
+        "name": "grav Linux -> Mac",
+        "seconds": 0.257
+      },
+      {
+        "name": "trilbymedia Mac -> Linux",
+        "seconds": 9.135
+      },
+      {
+        "name": "trilbymedia Linux -> Mac",
+        "seconds": 0.517
+      },
+      {
+        "name": "yetidevworks Mac -> Linux",
+        "seconds": 0.568
+      },
+      {
+        "name": "yetidevworks Linux -> Mac",
+        "seconds": 0.509
+      },
+      {
+        "name": "4 MiB bulk hash",
+        "seconds": 0.61
+      },
+      {
+        "name": "4 KiB delta edit hash",
+        "seconds": 0.564
+      },
+      {
+        "name": "rename arrival and old path removal",
+        "seconds": 0.74
+      },
+      {
+        "name": "all three test directories deleted on Linux",
+        "seconds": 0.572
+      }
+    ],
+    "removed_test_directories": true
+  },
+  "installed_lan_benchmark": {
+    "files": 8,
+    "bytes": 268435456,
+    "scan_workers": 2,
+    "bootstrap_seconds": 4.755,
+    "files_per_second": 1.7,
+    "payload_MB_per_second": 56.46,
+    "reverse_edit_latency_ms": 339.7,
+    "verified_all_payloads": true,
+    "environment": "Mac to home-omarchy; remote ~/Projects disk-backed roots; existing workloads left running",
+    "remote_reconciliation_secs": 3600,
+    "files_per_dir": 1000,
+    "depth": 1,
+    "delta_edits": [
+      {
+        "change": "4 KiB overwrite",
+        "file_bytes": 33554432,
+        "payload_bytes": 196574,
+        "delta_reused_bytes": 33357858,
+        "seconds_including_ssh_probes_and_status_refresh": 1.297,
+        "sha256_verified": true
+      },
+      {
+        "change": "19 byte insertion",
+        "file_bytes": 33554451,
+        "payload_bytes": 104674,
+        "delta_reused_bytes": 33449777,
+        "seconds_including_ssh_probes_and_status_refresh": 0.84,
+        "sha256_verified": true
+      },
+      {
+        "change": "4096 byte deletion",
+        "file_bytes": 33550355,
+        "payload_bytes": 19669,
+        "delta_reused_bytes": 33530686,
+        "seconds_including_ssh_probes_and_status_refresh": 1.315,
+        "sha256_verified": true
+      }
+    ]
+  },
+  "peak_sampled_linux_cpu_c": 77.125,
+  "final_health": {
+    "mac": {
+      "daemon_version": "0.3.2",
+      "age": 0,
+      "folders": {
+        "grav": {
+          "phase": "watching",
+          "pending_conflicts": 0,
+          "error": null,
+          "watcher": "native",
+          "full_scans": 1,
+          "scoped_scans": 4,
+          "hashed_files": 2,
+          "hashed_bytes": 76,
+          "queued_paths": 0
+        },
+        "trilbymedia": {
+          "phase": "watching",
+          "pending_conflicts": 0,
+          "error": null,
+          "watcher": "native",
+          "full_scans": 1,
+          "scoped_scans": 12,
+          "hashed_files": 34,
+          "hashed_bytes": 33489962,
+          "queued_paths": 0
+        },
+        "yetidevworks": {
+          "phase": "watching",
+          "pending_conflicts": 0,
+          "error": null,
+          "watcher": "native",
+          "full_scans": 1,
+          "scoped_scans": 4,
+          "hashed_files": 3,
+          "hashed_bytes": 8388653,
+          "queued_paths": 0
+        }
+      },
+      "observation_seconds": 82,
+      "observed_cpu_percent_one_core": 8.12,
+      "cpu_temps_c": null,
+      "scan_cache_reused_bytes": 24171651,
+      "signature_cache_hits": 0
+    },
+    "linux": {
+      "daemon_version": "0.3.2",
+      "age": 1,
+      "folders": {
+        "grav": {
+          "phase": "watching",
+          "pending_conflicts": 0,
+          "error": null,
+          "watcher": "native",
+          "full_scans": 1,
+          "scoped_scans": 4,
+          "hashed_files": 1,
+          "hashed_bytes": 39,
+          "queued_paths": 0
+        },
+        "trilbymedia": {
+          "phase": "watching",
+          "pending_conflicts": 0,
+          "error": null,
+          "watcher": "native",
+          "full_scans": 1,
+          "scoped_scans": 12,
+          "hashed_files": 1,
+          "hashed_bytes": 46,
+          "queued_paths": 0
+        },
+        "yetidevworks": {
+          "phase": "watching",
+          "pending_conflicts": 0,
+          "error": null,
+          "watcher": "native",
+          "full_scans": 1,
+          "scoped_scans": 5,
+          "hashed_files": 1,
+          "hashed_bytes": 47,
+          "queued_paths": 0
+        }
+      },
+      "observation_seconds": 83,
+      "observed_cpu_percent_one_core": 2.41,
+      "cpu_temps_c": [
+        53.5,
+        59.0,
+        49.875
+      ],
+      "scan_cache_reused_bytes": 132,
+      "signature_cache_hits": 3
+    }
+  }
+}
