@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Write,
     net::TcpListener,
     path::PathBuf,
     process::{Child, Command, Stdio},
@@ -608,7 +609,17 @@ fn delta_fixture(size: usize) -> Vec<u8> {
 
 fn delta_change(from: &Device, to: &Device, data: &[u8]) {
     let before = ysync::daemon::read_status(to.state.path()).unwrap();
-    from.write("delta.bin", data);
+    // Publish one complete version. An in-place truncate/write can let a scan
+    // replicate the empty intermediate version, removing the receiver's delta
+    // basis. That is valid synchronization, but invalidates this savings test.
+    let staging = from.path(".ysync/tmp");
+    fs::create_dir_all(&staging).unwrap();
+    let mut file = tempfile::NamedTempFile::new_in(staging).unwrap();
+    file.write_all(data).unwrap();
+    file.as_file()
+        .set_permissions(fs::metadata(from.path("delta.bin")).unwrap().permissions())
+        .unwrap();
+    file.persist(from.path("delta.bin")).unwrap();
     wait("delta content", from, to, || equals(to, "delta.bin", data));
     settled(from, to);
     wait("delta byte accounting", from, to, || {
@@ -622,9 +633,61 @@ fn delta_change(from: &Device, to: &Device, data: &[u8]) {
     let sent = after.received_bytes - before.received_bytes;
     assert!(
         sent < 1024 * 1024,
-        "delta sent {sent} bytes for a small edit"
+        "delta sent {sent} bytes for a small edit\nsource: {}\nreceiver: {}",
+        fs::read_to_string(from.state.path().join("status.json")).unwrap_or_default(),
+        fs::read_to_string(to.state.path().join("status.json")).unwrap_or_default()
     );
     assert!(after.delta_reused_bytes - before.delta_reused_bytes > data.len() as u64 - 1024 * 1024);
+}
+
+#[test]
+fn visible_truncation_streams_full_replacement_then_delta_recovers() {
+    let mut a = Device::new("a");
+    let mut b = Device::new("b");
+    a.dial(&b);
+    b.dial(&a);
+    let mut data = delta_fixture(4 * 1024 * 1024);
+    a.write("delta.bin", &data);
+    a.start();
+    b.start();
+    wait("initial content", &a, &b, || equals(&b, "delta.bin", &data));
+    settled(&a, &b);
+    wait("initial accounting", &a, &b, || {
+        ysync::daemon::read_status(b.state.path())
+            .is_ok_and(|s| s.received_bytes == data.len() as u64)
+    });
+
+    // Model a writer paused after truncation long enough for a watcher or
+    // safety scan to publish that intermediate version on the other device.
+    a.write("delta.bin", b"");
+    wait("visible truncation", &a, &b, || {
+        equals(&b, "delta.bin", b"")
+    });
+    settled(&a, &b);
+    let before = ysync::daemon::read_status(b.state.path()).unwrap();
+    data[2_000_000..2_004_096].fill(0xf3);
+    a.write("delta.bin", &data);
+    wait("replacement content", &a, &b, || {
+        equals(&b, "delta.bin", &data)
+    });
+    settled(&a, &b);
+    wait("full replacement accounting", &a, &b, || {
+        ysync::daemon::read_status(b.state.path()).is_ok_and(|s| {
+            s.received_bytes - before.received_bytes == data.len() as u64
+                && s.delta_reused_bytes == before.delta_reused_bytes
+        })
+    });
+
+    // Once a complete basis exists again, small edits must regain delta reuse.
+    data[3_000_000..3_004_096].fill(0x97);
+    delta_change(&b, &a, &data);
+    for device in [&a, &b] {
+        assert!(
+            ysync::conflicts::list(&ysync::store::open(device.state.path()).unwrap())
+                .unwrap()
+                .is_empty()
+        );
+    }
 }
 
 #[test]
