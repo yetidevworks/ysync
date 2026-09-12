@@ -8,13 +8,51 @@ use std::{
 };
 
 pub const NOISE: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum FolderMode {
+    #[default]
+    SendReceive,
+    SendOnly,
+    ReceiveOnly,
+}
+impl FolderMode {
+    pub fn can_send(self) -> bool {
+        self != Self::ReceiveOnly
+    }
+    pub fn can_receive(self) -> bool {
+        self != Self::SendOnly
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SendReceive => "send-receive",
+            Self::SendOnly => "send-only",
+            Self::ReceiveOnly => "receive-only",
+        }
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Folder {
     pub id: String,
     pub path: PathBuf,
     pub marker: String,
     pub paused: bool,
+    #[serde(default)]
+    pub mode: FolderMode,
     pub ignores: Vec<String>,
+}
+/// Hold the daemon lock throughout a policy change so no in-flight publication
+/// can cross the user's newly selected boundary.
+pub fn set_folder_mode(home: &Path, id: &str, mode: FolderMode) -> Result<()> {
+    let _stopped = crate::pairing::stopped(home)?;
+    edit(home, |c| {
+        c.folders
+            .iter_mut()
+            .find(|f| f.id == id)
+            .context("unknown folder")?
+            .mode = mode;
+        Ok(())
+    })
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Peer {
@@ -196,4 +234,18 @@ pub fn valid_folder_id(id: &str) -> Result<()> {
         bail!("folder ID must contain 1–64 letters, digits, hyphens or underscores");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn legacy_folder_defaults_to_bidirectional_and_unknown_policy_is_rejected() {
+        let json = serde_json::json!({"id":"code", "path":"/tmp/code", "marker":"marker", "paused":false, "ignores":[]});
+        let folder: Folder = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(folder.mode, FolderMode::SendReceive);
+        let mut invalid = json;
+        invalid["mode"] = "recieve-only".into();
+        assert!(serde_json::from_value::<Folder>(invalid).is_err());
+    }
 }

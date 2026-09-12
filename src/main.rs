@@ -161,10 +161,18 @@ enum FolderCmd {
     Add {
         id: String,
         path: PathBuf,
+        #[arg(long, value_enum, default_value = "send-receive")]
+        mode: config::FolderMode,
         #[arg(long, help = "Ignore common regenerable development output")]
         dev: bool,
     },
     List,
+    /// Set the local transfer policy. Stop the daemon first. Does not resolve conflicts or discard local edits.
+    Mode {
+        id: String,
+        #[arg(value_enum)]
+        mode: config::FolderMode,
+    },
     Pause {
         id: String,
     },
@@ -425,19 +433,32 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Folder { command } => match command {
-            FolderCmd::Add { id, path, dev } => {
-                engine::add_folder(&home, &id, &path, dev)?;
+            FolderCmd::Add {
+                id,
+                path,
+                dev,
+                mode,
+            } => {
+                engine::add_folder_with_mode(&home, &id, &path, dev, mode)?;
                 println!("Added {id}. Share this folder ID with approved devices.");
             }
             FolderCmd::List => {
                 for f in config::load(&home)?.folders {
                     println!(
-                        "{}\t{}\t{}",
+                        "{}\t{}\t{}\t{}",
                         f.id,
                         if f.paused { "paused" } else { "active" },
+                        f.mode.as_str(),
                         f.path.display()
                     );
                 }
+            }
+            FolderCmd::Mode { id, mode } => {
+                config::set_folder_mode(&home, &id, mode)?;
+                println!(
+                    "{id}: {}. Existing files, history and conflicts are retained. Restart the daemon to use this policy.",
+                    mode.as_str()
+                );
             }
             FolderCmd::Pause { id } => config::edit(&home, |c| {
                 let f = c

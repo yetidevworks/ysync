@@ -20,6 +20,8 @@ pub struct Pending {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Delivery {
+    #[serde(default)]
+    pub send_disabled: Option<String>,
     pub active_lanes: usize,
     pub sampled_at: u64,
     pub local_head: u64,
@@ -33,11 +35,15 @@ type Observations = BTreeMap<String, BTreeMap<String, Vec<Option<u64>>>>;
 
 #[derive(Default)]
 pub struct Tracker {
+    remote: Mutex<BTreeMap<String, BTreeMap<String, config::FolderMode>>>,
     online: Mutex<BTreeMap<String, std::collections::BTreeSet<u8>>>,
     observed: Mutex<Observations>,
     samples: Mutex<Deliveries>,
 }
 impl Tracker {
+    pub fn remote_modes(&self, peer: &str, modes: BTreeMap<String, config::FolderMode>) {
+        self.remote.lock().unwrap().insert(peer.into(), modes);
+    }
     pub fn connected(&self, peer: &str, lane: u8, connected: bool) {
         let mut online = self.online.lock().unwrap();
         let lanes = online.entry(peer.into()).or_default();
@@ -156,6 +162,7 @@ pub fn run(shared: Arc<daemon::Shared>) {
     let mut filters = BTreeMap::new();
     while !shared.stopping() {
         if let Ok(cfg) = config::load(&shared.home) {
+            let remote = shared.delivery.remote.lock().unwrap().clone();
             let observed = shared.delivery.observed.lock().unwrap().clone();
             let old = shared.delivery.samples.lock().unwrap().clone();
             let mut samples = Deliveries::new();
@@ -180,9 +187,24 @@ pub fn run(shared: Arc<daemon::Shared>) {
                     let mut sample = Delivery {
                         sampled_at: daemon::now(),
                         acknowledged: cursors.clone(),
+                        send_disabled: if !folder.mode.can_send() {
+                            Some("local folder is receive-only".into())
+                        } else if remote
+                            .get(&peer.id)
+                            .and_then(|m| m.get(&folder.id))
+                            .is_some_and(|m| !m.can_receive())
+                        {
+                            Some("peer folder is send-only (last handshake)".into())
+                        } else {
+                            None
+                        },
                         ..Default::default()
                     };
                     let result = (|| -> Result<()> {
+                        // A disabled direction is not an empty/delivered queue.
+                        if sample.send_disabled.is_some() {
+                            return Ok(());
+                        }
                         let tx = c.transaction()?;
                         sample.local_head = head(&tx, &folder.id)?;
                         if cursors.is_empty() || cursors.iter().any(Option::is_none) {

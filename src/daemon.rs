@@ -29,6 +29,8 @@ pub fn now() -> u64 {
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct FolderStatus {
     #[serde(default)]
+    pub mode: config::FolderMode,
+    #[serde(default)]
     pub pending_conflicts: u64,
     pub phase: String,
     pub scanned: u64,
@@ -914,6 +916,7 @@ pub fn serve(home: &Path) -> Result<()> {
                 };
                 shared.event("thermal", None, &detail);
             }
+            let modes: HashMap<_, _> = cfg.folders.iter().map(|f| (f.id.clone(), f.mode)).collect();
             for f in cfg.folders {
                 if scanned.insert(f.id.clone()) {
                     let s = shared.clone();
@@ -1002,6 +1005,7 @@ pub fn serve(home: &Path) -> Result<()> {
             status.thermal = thermal.clone();
             status.watch_limits = crate::capacity::limits();
             for (id, f) in &mut status.folders {
+                f.mode = modes.get(id).copied().unwrap_or_default();
                 if let Some(counts) = &conflict_counts {
                     f.pending_conflicts = counts.get(id).copied().unwrap_or(0);
                 }
@@ -1118,7 +1122,8 @@ pub fn monitor(home: &Path, once: bool) -> Result<()> {
         println!("FOLDERS");
         for (id, f) in s.folders {
             println!(
-                "  {id:<20} {:<10} {:>9} files  {:>8.2} GB  scanned {:>9}",
+                "  {id:<20} {:<12} {:<10} {:>9} files  {:>8.2} GB  scanned {:>9}",
+                f.mode.as_str(),
                 f.phase,
                 f.files,
                 f.bytes as f64 / 1e9,

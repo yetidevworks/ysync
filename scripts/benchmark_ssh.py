@@ -23,6 +23,7 @@ def main():
     p.add_argument("--remote-base", default="~/.cache", help="Parent for isolated test state and files")
     p.add_argument("--files-per-dir", type=int, default=1000)
     p.add_argument("--depth", type=int, default=1)
+    p.add_argument("--seed", default="ysync-evidence-v1")
     p.add_argument("--delta",action="store_true",help="Measure overwrite, insertion, and deletion of the first large file")
     args=p.parse_args()
     if args.files<1 or args.size<1 or not 1<=args.scan_workers<=64:p.error("invalid benchmark size or worker count")
@@ -54,10 +55,10 @@ def main():
             cli("peer","add",bid,"--address",f"{host}:{port}","--folder","bench")
             peer=dict(id=aid,name="benchmark-mac",address=None,approved=True,folders=["bench"])
             py(f"import json,pathlib\np=pathlib.Path({rs!r})/'config.json'\nc=json.loads(p.read_text());c['peers'].append(json.loads({json.dumps(peer)!r}));c['rescan_secs']=3600;p.write_text(json.dumps(c))\n")
-            payload=os.urandom(args.size)
             for i in range(args.files):
                 d=files/f"d{i//args.files_per_dir:05}"
                 for depth in range(1,args.depth):d=d/f"level{depth}"
+                payload=hashlib.shake_256(f"{args.seed}:{i}".encode()).digest(args.size)
                 d.mkdir(parents=True,exist_ok=True);(d/f"f{i:08}.bin").write_bytes(payload)
             started=time.monotonic()
             with (base/"local.log").open("w") as log:
@@ -74,8 +75,7 @@ def main():
                     time.sleep(.2)
                 seconds=time.monotonic()-started
                 # Hash every received file on the server, including shape/count checks.
-                digest=hashlib.sha256(payload).hexdigest()
-                check=py(f"import pathlib,hashlib\nr=pathlib.Path({rf!r});n={args.files}\nfor i in range(n):\n p=r/f'd{{i//{args.files_per_dir}:05}}'\n for depth in range(1,{args.depth}):p=p/f'level{{depth}}'\n p=p/f'f{{i:08}}.bin'\n assert hashlib.sha256(p.read_bytes()).hexdigest()=={digest!r},p\nprint(n)\n")
+                check=py(f"import pathlib,hashlib\nr=pathlib.Path({rf!r});n={args.files}\nfor i in range(n):\n p=r/f'd{{i//{args.files_per_dir}:05}}'\n for depth in range(1,{args.depth}):p=p/f'level{{depth}}'\n p=p/f'f{{i:08}}.bin'\n assert hashlib.sha256(p.read_bytes()).hexdigest()==hashlib.sha256(hashlib.shake_256(({args.seed!r}+':'+str(i)).encode()).digest({args.size})).hexdigest(),p\nprint(n)\n")
                 assert int(check)==args.files
                 delta_results=[]
                 if args.delta:
@@ -88,7 +88,7 @@ def main():
                         if before['received_bytes']==args.files*args.size:break
                         if time.monotonic()>deadline:raise TimeoutError('baseline counters')
                         time.sleep(.2)
-                    data=bytearray(payload)
+                    data=bytearray(target.read_bytes())
                     for change in ['4 KiB overwrite','19 byte insertion','4096 byte deletion']:
                         if change=='4 KiB overwrite':data[len(data)//2:len(data)//2+4096]=bytes([0xa1])*4096
                         elif change=='19 byte insertion':data[1234:1234]=b'unaligned insertion'
@@ -113,7 +113,12 @@ def main():
                     if time.monotonic()-edit_start>30:raise TimeoutError("reverse watcher exceeded 30s")
                     time.sleep(.01)
                 assert (files/'reverse-probe.txt').read_text()=='linux to mac'
-                result=dict(files=args.files,bytes=args.files*args.size,scan_workers=args.scan_workers,
+                result=dict(dataset_seed=args.seed, dataset="distinct deterministic SHAKE-256 payloads per file",
+                            cache_state="uncontrolled OS cache; freshly generated source; fresh receiver/index",
+                            binary_version=cli("--version").strip(),
+                            local_binary_sha256=hashlib.sha256(Path(binary).read_bytes()).hexdigest(),
+                            remote_binary_version=rcli("--version").strip(),
+                            files=args.files,bytes=args.files*args.size,scan_workers=args.scan_workers,
                             bootstrap_seconds=round(seconds,3),files_per_second=round(args.files/seconds,1),
                             payload_MB_per_second=round(args.files*args.size/seconds/1e6,2),
                             reverse_edit_latency_ms=round((time.monotonic()-edit_start)*1000,1),

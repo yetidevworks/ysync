@@ -1,0 +1,47 @@
+{
+  "dataset_seed": "ysync-evidence-v1",
+  "dataset": "distinct deterministic SHAKE-256 payloads per file",
+  "cache_state": "uncontrolled OS cache; freshly generated source; fresh receiver/index",
+  "binary_version": "ysync 0.4.0-dev",
+  "local_binary_sha256": "6469ba0d63613ae6a0a68c9167f1e35b1977f7057a41e4931a78cab686f06659",
+  "remote_binary_version": "ysync 0.4.0-dev",
+  "files": 8,
+  "bytes": 268435456,
+  "scan_workers": 2,
+  "bootstrap_seconds": 5.183,
+  "files_per_second": 1.5,
+  "payload_MB_per_second": 51.8,
+  "reverse_edit_latency_ms": 422.2,
+  "verified_all_payloads": true,
+  "environment": "Mac to home-omarchy; remote ~/.cache disk-backed roots; existing workloads left running",
+  "remote_reconciliation_secs": 3600,
+  "files_per_dir": 1000,
+  "depth": 1,
+  "delta_edits": [
+    {
+      "change": "4 KiB overwrite",
+      "file_bytes": 33554432,
+      "payload_bytes": 76815,
+      "delta_reused_bytes": 33477617,
+      "seconds_including_ssh_probes_and_status_refresh": 1.367,
+      "sha256_verified": true
+    },
+    {
+      "change": "19 byte insertion",
+      "file_bytes": 33554451,
+      "payload_bytes": 164799,
+      "delta_reused_bytes": 33389652,
+      "seconds_including_ssh_probes_and_status_refresh": 0.844,
+      "sha256_verified": true
+    },
+    {
+      "change": "4096 byte deletion",
+      "file_bytes": 33550355,
+      "payload_bytes": 170075,
+      "delta_reused_bytes": 33380280,
+      "seconds_including_ssh_probes_and_status_refresh": 0.841,
+      "sha256_verified": true
+    }
+  ],
+  "remote_binary_sha256_verified_after_trial": "4a39187977401ec55b5b94d35a64c8fe9ed2b7c7392c35ff9f5572e3ce82c2f1"
+}

@@ -585,6 +585,7 @@ impl Dashboard {
                         };
                         Row::new(vec![
                             Cell::from(clean(id)),
+                            Cell::from(f.mode.as_str()).fg(MUTED),
                             Cell::from(clean(&f.phase)).fg(color),
                             Cell::from(count(f.files)),
                             Cell::from(if f.pending_conflicts > 0 {
@@ -601,14 +602,15 @@ impl Dashboard {
         let table = Table::new(
             rows,
             [
-                Constraint::Percentage(35),
                 Constraint::Percentage(27),
+                Constraint::Length(12),
                 Constraint::Percentage(23),
-                Constraint::Percentage(15),
+                Constraint::Percentage(20),
+                Constraint::Min(9),
             ],
         )
         .header(
-            Row::new(["Folder", "Scanner", "Last files", "Conflicts"])
+            Row::new(["Folder", "Direction", "Scanner", "Last files", "Conflicts"])
                 .fg(MUTED)
                 .bottom_margin(1),
         )
@@ -633,8 +635,9 @@ impl Dashboard {
             {
                 lines.push(
                     Line::from(format!(
-                        "{} · {} · {} files at last scan",
+                        "{} · {} · {} · {} files at last scan",
                         clean(id),
+                        f.mode.as_str(),
                         bytes(f.bytes as f64),
                         count(f.files)
                     ))
@@ -963,12 +966,18 @@ fn delivery_label(
     if !approved {
         return ("approval needed".into(), AMBER);
     }
+    if !folder.mode.can_send() {
+        return ("sending disabled · receive-only".into(), MUTED);
+    }
     if !connected {
         return ("offline · delivery unconfirmed".into(), MUTED);
     }
     let Some(sample) = sample else {
         return ("awaiting delivery status".into(), MUTED);
     };
+    if let Some(reason) = &sample.send_disabled {
+        return (format!("sending disabled · {reason}"), AMBER);
+    }
     if sample.error.is_some() {
         return ("queue unavailable · d for details".into(), RED);
     }
@@ -1020,6 +1029,31 @@ fn delivery_label(
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
+    #[test]
+    fn disabled_direction_is_not_reported_as_delivered() {
+        let mut folder = daemon::FolderStatus {
+            mode: config::FolderMode::ReceiveOnly,
+            ..Default::default()
+        };
+        let mut sample = crate::progress::Delivery::default();
+        assert!(
+            delivery_label(Some(&sample), &folder, true, true, 0)
+                .0
+                .contains("sending disabled")
+        );
+        folder.mode = config::FolderMode::SendReceive;
+        sample.send_disabled = Some("peer folder is send-only".into());
+        assert!(
+            delivery_label(Some(&sample), &folder, true, true, 0)
+                .0
+                .contains("sending disabled")
+        );
+        assert_ne!(
+            delivery_label(Some(&sample), &folder, true, true, 0).1,
+            GREEN
+        );
+    }
+
     #[test]
     fn delivery_never_confuses_scanning_conflicts_or_disconnection_with_delivery() {
         let mut folder = daemon::FolderStatus {

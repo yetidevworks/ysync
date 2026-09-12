@@ -1284,3 +1284,278 @@ fn ineffective_delta_streams_next_version_without_signature_reads() {
         data.len() as u64
     );
 }
+
+fn set_mode(d: &Device, mode: config::FolderMode) {
+    config::set_folder_mode(d.state.path(), "code", mode).unwrap();
+}
+
+fn directional_replication(
+    source_mode: config::FolderMode,
+    receiver_mode: config::FolderMode,
+    receiver_dials: bool,
+) {
+    let mut a = Device::new("source");
+    let mut b = Device::new("receiver");
+    set_mode(&a, source_mode);
+    set_mode(&b, receiver_mode);
+    a.dial(&b);
+    b.dial(&a);
+    let passive = if receiver_dials { &a } else { &b };
+    config::edit(passive.state.path(), |c| {
+        c.peers[0].address = None;
+        Ok(())
+    })
+    .unwrap();
+    a.write("shared", b"baseline");
+    a.write("delete-me", b"remove later");
+    // Exercise the bulk lane as well as directory metadata and small-file lanes.
+    let bulk = vec![0x53; 2 * 1024 * 1024];
+    a.write("assets/bulk", &bulk);
+    a.start();
+    b.start();
+    wait("one-way bootstrap", &a, &b, || {
+        equals(&b, "assets/bulk", &bulk)
+    });
+    settled(&a, &b);
+    // Changes on the receiver remain visible/indexed, but cannot reach the source.
+    b.write("receiver-private", b"must stay here");
+    b.write("shared", b"accidental receiver edit");
+    wait("receiver edit indexed", &a, &b, || {
+        let c = ysync::store::open(b.state.path()).unwrap();
+        ysync::store::get(&c, "code", "shared")
+            .unwrap()
+            .is_some_and(|e| e.hash == blake3::hash(b"accidental receiver edit").to_hex().as_str())
+    });
+    b.stop();
+    a.write("shared", b"new source edit");
+    fs::remove_file(a.path("delete-me")).unwrap();
+    a.write("after-restart", b"source still delivers");
+    b.start();
+    wait("one-way reconnect and deletion", &a, &b, || {
+        equals(&b, "after-restart", b"source still delivers")
+            && !b.path("delete-me").exists()
+            && ysync::daemon::read_status(b.state.path()).is_ok_and(|s| {
+                s.folders
+                    .get("code")
+                    .is_some_and(|f| f.pending_conflicts == 1)
+            })
+    });
+    assert!(equals(&a, "shared", b"new source edit"));
+    assert!(!a.path("receiver-private").exists());
+    assert!(equals(&b, "shared", b"accidental receiver edit"));
+    assert!(equals(&b, "receiver-private", b"must stay here"));
+    let conflicts = ysync::conflicts::list(&ysync::store::open(b.state.path()).unwrap()).unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(
+        conflicts[0].incoming.hash,
+        blake3::hash(b"new source edit").to_hex().as_str()
+    );
+    let sa = ysync::daemon::read_status(a.state.path()).unwrap();
+    let sb = ysync::daemon::read_status(b.state.path()).unwrap();
+    assert_eq!(
+        sa.received_entries, 0,
+        "disabled direction must not exchange metadata either"
+    );
+    assert_eq!(sb.sent_entries, 0);
+    assert_eq!(sa.folders["code"].mode, source_mode);
+    assert_eq!(sb.folders["code"].mode, receiver_mode);
+    // The CLI may not change a policy while transfers are in flight.
+    assert!(
+        config::set_folder_mode(a.state.path(), "code", config::FolderMode::SendReceive).is_err()
+    );
+}
+
+#[test]
+fn directionality_send_only_to_receive_only_survives_restart() {
+    directional_replication(
+        config::FolderMode::SendOnly,
+        config::FolderMode::ReceiveOnly,
+        false,
+    );
+}
+
+#[test]
+fn directionality_receive_only_can_initiate_and_protect_source() {
+    directional_replication(
+        config::FolderMode::SendReceive,
+        config::FolderMode::ReceiveOnly,
+        true,
+    );
+}
+
+#[test]
+fn directionality_send_only_rejects_reverse_from_bidirectional_peer() {
+    directional_replication(
+        config::FolderMode::SendOnly,
+        config::FolderMode::SendReceive,
+        true,
+    );
+}
+
+#[test]
+fn directionality_identical_one_way_modes_report_mismatch_without_delivery() {
+    for mode in [
+        config::FolderMode::SendOnly,
+        config::FolderMode::ReceiveOnly,
+    ] {
+        let mut a = Device::new("same-mode-a");
+        let mut b = Device::new("same-mode-b");
+        set_mode(&a, mode);
+        set_mode(&b, mode);
+        a.write("only-a", b"a");
+        b.write("only-b", b"b");
+        a.dial(&b);
+        b.dial(&a);
+        a.start();
+        b.start();
+        wait("direction mismatch diagnosis", &a, &b, || {
+            ysync::daemon::read_status(a.state.path()).is_ok_and(|s| {
+                s.events
+                    .iter()
+                    .any(|e| e.detail.contains("direction mismatch"))
+            })
+        });
+        assert!(!a.path("only-b").exists());
+        assert!(!b.path("only-a").exists());
+        assert_eq!(
+            ysync::daemon::read_status(a.state.path())
+                .unwrap()
+                .sent_entries,
+            0
+        );
+        assert_eq!(
+            ysync::daemon::read_status(b.state.path())
+                .unwrap()
+                .sent_entries,
+            0
+        );
+    }
+}
+
+#[test]
+fn deterministic_mixed_changes_converge_across_repeated_process_crashes() {
+    let mut a = Device::new("sequence-a");
+    let mut b = Device::new("sequence-b");
+    a.dial(&b);
+    b.dial(&a);
+    a.write("baseline", b"baseline");
+    a.start();
+    b.start();
+    wait("initial sequence baseline", &a, &b, || {
+        equals(&b, "baseline", b"baseline")
+    });
+    settled(&a, &b);
+    let mut expected =
+        std::collections::BTreeMap::from([("baseline".to_owned(), b"baseline".to_vec())]);
+    let mut rng = 0x59_53_59_4e_43u64;
+    for round in 0..8 {
+        // SIGKILL both processes at a verified baseline, then change disjoint
+        // paths offline. This is process-crash recovery, not power-loss testing.
+        a.stop();
+        b.stop();
+        for (side, d) in [("a", &a), ("b", &b)] {
+            for i in 0..4 {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                let path = format!("{side}/file-{i}");
+                let data = format!("round={round}; value={rng}\n").into_bytes();
+                d.write(&path, &data);
+                expected.insert(path, data);
+            }
+            if round > 0 {
+                let previous = format!("{side}/rename-{}", round - 1);
+                fs::remove_file(d.path(&previous)).unwrap();
+                expected.remove(&previous);
+            }
+            let renamed = format!("{side}/rename-{round}");
+            fs::rename(d.path(&format!("{side}/file-0")), d.path(&renamed)).unwrap();
+            let bytes = expected.remove(&format!("{side}/file-0")).unwrap();
+            expected.insert(renamed, bytes);
+        }
+        if round % 2 == 0 {
+            a.start();
+            b.start();
+        } else {
+            b.start();
+            a.start();
+        }
+        wait("mixed offline changes converge", &a, &b, || {
+            expected
+                .iter()
+                .all(|(p, bytes)| equals(&a, p, bytes) && equals(&b, p, bytes))
+        });
+        settled(&a, &b);
+        for d in [&a, &b] {
+            let c = ysync::store::open(d.state.path()).unwrap();
+            assert!(
+                ysync::conflicts::list(&c).unwrap().is_empty(),
+                "unexpected conflict in round {round}"
+            );
+            let actual: std::collections::BTreeMap<_, _> =
+                ysync::store::changes(&c, "code", 0, 1000)
+                    .unwrap()
+                    .into_iter()
+                    .filter(|e| e.kind == ysync::model::Kind::File)
+                    .map(|e| (e.path.clone(), fs::read(d.path(&e.path)).unwrap()))
+                    .collect();
+            assert_eq!(
+                actual, expected,
+                "unexpected surviving/deleted file in round {round}"
+            );
+        }
+    }
+}
+
+#[test]
+fn directionality_is_per_folder_even_with_opposite_flows_on_one_connection() {
+    let mut a = Device::new("opposite-a");
+    let mut b = Device::new("opposite-b");
+    let a_reverse = tempfile::tempdir().unwrap();
+    let b_reverse = tempfile::tempdir().unwrap();
+    engine::add_folder_with_mode(
+        a.state.path(),
+        "reverse",
+        a_reverse.path(),
+        false,
+        config::FolderMode::ReceiveOnly,
+    )
+    .unwrap();
+    engine::add_folder_with_mode(
+        b.state.path(),
+        "reverse",
+        b_reverse.path(),
+        false,
+        config::FolderMode::SendOnly,
+    )
+    .unwrap();
+    set_mode(&a, config::FolderMode::SendOnly);
+    set_mode(&b, config::FolderMode::ReceiveOnly);
+    a.dial(&b);
+    b.dial(&a);
+    for d in [&a, &b] {
+        config::edit(d.state.path(), |c| {
+            c.peers[0].folders.push("reverse".into());
+            Ok(())
+        })
+        .unwrap();
+    }
+    a.write("forward", b"forward");
+    fs::write(b_reverse.path().join("reverse"), b"reverse").unwrap();
+    a.start();
+    b.start();
+    wait("opposite folder flows", &a, &b, || {
+        equals(&b, "forward", b"forward")
+            && fs::read(a_reverse.path().join("reverse")).is_ok_and(|v| v == b"reverse")
+    });
+    fs::write(a_reverse.path().join("forbidden"), b"local receiver only").unwrap();
+    b.write("forbidden", b"local receiver only");
+    a.write("forward-barrier", b"after");
+    fs::write(b_reverse.path().join("reverse-barrier"), b"after").unwrap();
+    wait("opposite flow barriers", &a, &b, || {
+        equals(&b, "forward-barrier", b"after")
+            && fs::read(a_reverse.path().join("reverse-barrier")).is_ok_and(|v| v == b"after")
+    });
+    assert!(!a.path("forbidden").exists());
+    assert!(!b_reverse.path().join("forbidden").exists());
+}

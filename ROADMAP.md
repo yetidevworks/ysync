@@ -19,8 +19,17 @@
 
 - [x] Ratatui monitoring and guarded conflict review with verified previews and explicit keep-local confirmation (0.2.5–0.2.6).
 - [x] Per-peer outbound delivery in the TUI: lane acknowledgements, bounded queue counts, and explicit offline/scanning/conflict states. Counts are logical indexed versions; remote scan/conflict state is not certified.
-- [x] Initial pairing workflow: receiver metadata export, merge/seed-local preview, paginated plan inspection, and atomic explicit source baselines (0.3.2). No permanent one-way mode; new independent receiver edits remain protected.
+- [x] Initial pairing workflow: receiver metadata export, merge/seed-local preview, paginated plan inspection, and atomic explicit source baselines (0.3.2). This one-time baseline workflow is separate from the permanent folder policies below.
 - [x] Retention controls: dry runs, age/space limits, manual cleanup, and separately opt-in automatic maintenance. Unresolved/uncommitted conflicts and locked partials are protected (0.3.2). Very large archive directories and unsupported legacy artifacts still require manual maintenance.
+
+## Completed in 0.4.0
+
+- [x] Explicit `send-receive`, `send-only` and conservative `receive-only` folder policies; protocol 6 negotiates each folder and lane, with local enforcement before receiving/publication. Existing configurations remain bidirectional.
+- [x] CLI policy changes hold the stopped-daemon lock; mode is visible in JSON/TUI and disabled sending is not reported as successful delivery.
+- [x] Isolated direction/restart/receiver-divergence tests and deterministic mixed offline edits across repeated process crashes.
+- [x] Distinct reproducible benchmark contents, repeated raw trials and latency/CPU observations. See BENCHMARKING.md for limits; no comparative performance win is established.
+- [x] Correct README/validation drift about released lanes, caches, retention and historical tests.
+- [ ] Receiver local-difference review/revert workflow; forced mirroring remains a separate explicit policy decision.
 
 ## Next performance work
 
@@ -30,6 +39,7 @@ Temperature-aware scanner pause/resume is implemented and covered by controlled 
 - [x] Bounded single-read initial fast path (0.3.2). Reuse scanned payloads up to 8 MiB from a configurable RAM cache. Larger/evicted files still need another read; universal streaming handoff remains future work.
 - [x] Persistent chunk indexes and adaptive delta selection (0.3.2). Reuse verified fingerprint-bound signatures and received layouts across restarts; fall back when savings are poor and temporarily skip subsequent probes.
 - [ ] Representative LAN/disk benchmarks and long-running evaluation of the new lanes and caches, including independent Linux execution. Separate disk scheduling/rate budgets and wider single-read coverage remain possible follow-ups.
+- [ ] Reduce idle protocol/index polling while preserving edit responsiveness. September 12 repeated local fixtures measured about 2–3% of one core per daemon over ten-second idle windows; compare CPU seconds and edit latency before/after, including a full safety-scan interval.
 
 ## Operational work
 

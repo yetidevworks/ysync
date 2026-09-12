@@ -1,4 +1,8 @@
-# Evaluation results — September 10, 2026
+# Evaluation results
+
+This is a chronological evidence log. Counts, versions, deployment state and unresolved issues in older sections describe those trials, not the current release. Later sections supersede earlier observations; short successful trials do not establish long-term reliability. Reproducible comparison requirements are in [BENCHMARKING.md](BENCHMARKING.md).
+
+## September 10, 2026 baseline
 
 This is an experimental implementation. Earlier transfer tests used disposable folders; the live-folder scanner evaluation below used the actual Projects/workspace roots with no peers or transfers. Existing content was only read; ysync markers/ignore files and temporary probe files were created. Syncthing was stopped before the live evaluation. No persistent ysync service was installed; capped Linux trials used temporary systemd jobs that were stopped afterward.
 
@@ -22,7 +26,7 @@ Delta integration tests edit a 16 MiB file in both directions, including an over
 
 Watcher tests coalesce 100,000 duplicate notifications into one path, bound unique-path overflow, preserve recovery signals, and check that directory metadata notifications and unchanged files do not rehash content. Scoped subtree deletion must leave unrelated paths untouched and journal children before parents. Integration tests exercise write bursts, deletion, populated-directory rename, subsequent edits under the new name, and ignored-tree churn with no extra full scans. Linux-specific coverage verifies selective watch registration and automatically recovers from an injected directory-permission failure without restarting the daemon. That recovery test ran as the unprivileged user on the actual server.
 
-Service installation, login/reboot behavior, power-loss recovery, and long-duration operation have not been validated. The live multi-million-entry evaluation below identified unresolved operational limits. Passing these tests is not a security audit or proof of production readiness.
+At this September 10 baseline, service installation, login/reboot behavior, power-loss recovery, and long-duration operation had not been validated. Later service tests cover installation and process restart recovery; actual reboot/power-loss and long-duration evaluation remain separate gaps. The live multi-million-entry evaluation below identified unresolved operational limits. Passing these tests is not a security audit or proof of production readiness.
 
 ## Live Projects/workspace scanner evaluation
 
@@ -239,7 +243,7 @@ The panel queries read-only SQLite connections only on request, returns at most 
 
 Resolver tests reject running-daemon access, stale content/metadata and clock reviews, and a deleted path recreated after review. A manually merged file resolves without changing its bytes, incoming archives remain, unrelated conflict records remain, and a failed decision rolls back index changes. Preview tests cover binary/oversized content, corrupted archives, symlink archive rejection, scoped search and bounded pages. Render tests exercise narrow and wide layouts and keep confirmation controls visible. The real terminal test cancels a resolution, then explicitly confirms one disposable record and checks the database and preserved local absence. Existing encrypted transfer and conflict-propagation tests still apply.
 
-## Unreleased pairing and retention
+## Pairing and retention (shipped in 0.3.2)
 
 Local macOS validation on September 12, 2026 passes 74 unit tests and 15 integration tests with native watchers required. Clippy with warnings denied, Rust 1.88 all-target checks, terminal restoration/conflict-panel PTY checks, and a disposable-folder CLI walkthrough also pass. These features have not yet been released or deployed to the live Homebrew services; new Linux execution/CI validation remains outstanding.
 
@@ -247,7 +251,7 @@ Pairing coverage includes normal merge versus explicit source seeding, stale-pla
 
 Retention coverage includes disabled defaults, non-deleting previews, age and space policies, working-file hard-link preservation, locked resumable buffers, symlink/unknown-artifact protection, and protection of both pending and uncommitted conflict archives. An integration test enables automatic maintenance on a disposable daemon, verifies that its first scheduled cleanup removes an old archive, and verifies that the working file and running daemon remain intact. No real conflict/version archives were cleaned and no live retention policy was enabled during development.
 
-## Unreleased transfer lanes and disk-read reduction
+## Transfer lanes and disk-read reduction (shipped in 0.3.2)
 
 September 12, 2026 macOS validation covered 80 unit tests and 18 integration tests. The full suite passed with native watchers required, followed by targeted rechecks for the final lane-startup timing adjustment and signature-cache eviction test. Clippy with warnings denied, Rust 1.88 all-target checks, formatting, and the real-terminal monitor/conflict-panel checks pass. New independent Linux execution remains outstanding. The live Homebrew services were not upgraded, and no real sync files or archive policies were changed by these trials.
 
@@ -280,3 +284,24 @@ Disposable files inside each active share verified Mac-to-Linux and Linux-to-Mac
 The installed Homebrew binaries then transferred eight 32 MiB files into an isolated root on the Linux **project disk**, rather than the separate system/cache disk. All 256 MiB verified in 4.755 s, averaging 56.46 MB/s including startup, indexing and durable writes. The reverse edit took 340 ms including its SSH write. Subsequent 32 MiB-file deltas sent 196,574 bytes for a 4 KiB overwrite, 104,674 bytes for a 19-byte insertion, and 19,669 bytes for a 4 KiB deletion; every resulting file was SHA-256 verified. These are single samples with existing workloads running, not a sustained-link or comparative Syncthing benchmark.
 
 Five-second temperature samples across deployment/testing peaked at 77.125°C on Linux. No thermal limit or CPU quota was added. During an approximately 83-second observation after the isolated benchmark, daemon CPU time averaged 2.41% of one core on Linux and 8.12% on the Mac; normal application edits continued, so this was not a controlled idle-power trial. Final Linux sensors read 49.9–59.0°C. Details are preserved in [benchmarks/upgrade-0.3.2-lan.json](benchmarks/upgrade-0.3.2-lan.json). Both services remained running after verification; existing monitors can be reopened to use the installed version.
+
+## September 12: explicit directions and stronger evidence (0.4.0-dev)
+
+The unreleased development build uses protocol 6. Mac validation covers 89 unit and 25 integration tests; Linux covers 93 unit and 25 integration tests with native inotify required and two test threads. The full suites passed before two final tests were added; those protocol-5 rejection and opposite-per-folder-flow tests then passed independently on both platforms. Formatting, all-target Clippy with warnings denied, four Python packaging tests, and the monitor PTY checks passed. Raw version/source/binary fingerprints and execution boundaries: [directionality-validation-20260912.json](benchmarks/directionality-validation-20260912.json).
+
+Direction tests cover a sender or receiver initiating connections, bulk and metadata lanes, source deletions, receiver restart, preservation of accidental receiver edits as conflicts, and zero reverse entry transfer. Existing configuration defaults to send-receive; unknown mode strings fail parsing. The policy command holds the daemon lock and refuses an active daemon. A publication-gate regression changes the local receiver to send-only while it waits and verifies no publication or acknowledgement. Opposite directions on separate folders share a connection successfully; incompatible same-mode folders report a mismatch. Protocol 5 is refused before folder exchange.
+
+The deterministic eight-round recovery test kills both isolated processes at verified baselines, alternates startup order and applies disjoint edits, renames and deletions offline. Each round checks both complete indexed file maps against an independent expected-content map and requires no conflicts. This supplements existing interrupted-transfer coverage; it does not simulate power loss or establish a long-running soak.
+
+Repeated isolated local trials use **distinct seeded contents**, two scan workers, default three lanes/64 MiB caches, and send-only to receive-only. Source generation warms the OS cache; receiver files and indexes start fresh. The retained `transfer_lanes` and cache fields in these trial records are null because no override was requested; the pinned development binary uses the defaults above. Every destination file is SHA-256 verified before subsequent edits. Each dataset has three trials and 60 total edit samples, with 10 ms polling; throughput is logical payload MB/s.
+
+| Local fixture | Bootstrap median (range) | Throughput median | Edit median / empirical p95 |
+| --- | --- | --- | --- |
+| 2,000 × 4 KiB | 7.062 s (6.902–7.445) | 283.2 files/s; 1.16 MB/s | 211.35 / 277.3 ms |
+| 8 × 32 MiB | 2.391 s (2.222–2.909) | 112.25 MB/s | 214.7 / 275.9 ms |
+
+Raw repeated results: [small files](benchmarks/directionality-local-small-20260912.json), [bulk files](benchmarks/directionality-local-bulk-20260912.json). The ten-second idle observations measured roughly 0.24–0.26 CPU seconds per sender and 0.21–0.23 per receiver (about 2–3% of one core). This exposes remaining idle polling work; it is not a zero-CPU result or a measurement across a full safety-scan interval. Cumulative CPU before idle includes bootstrap, edits and the elapsed verification period. Earlier fixtures, file counts/sizes and caching conditions differ, so these numbers do not establish a speedup or regression against prior runs.
+
+An isolated disk-backed Mac→Linux trial of eight distinct 32 MiB files completed in **5.183 s / 51.80 MB/s**, with every file SHA-256 verified. A reverse edit arrived in 422.2 ms including the probe overhead. A 4 KiB overwrite, 19-byte insertion and 4 KiB deletion within a 32 MiB file sent 76,815 / 164,799 / 170,075 new payload bytes respectively; all resulting files verified. Signature/plan traffic is excluded. This LAN trial used the normal bidirectional mode and active background workloads, not the one-way local configuration. It is one trial, not a throughput ranking. Raw record: [LAN/delta](benchmarks/directionality-lan-20260912.json).
+
+The installed Mac and Linux 0.3.3 services remained running with their original PIDs throughout. Final read-only health checks showed all three live folders natively watching, connected and without active conflicts. The development policies have **not** been installed or applied to those live folders.

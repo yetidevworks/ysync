@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0
+
+- Add explicit per-folder `send-receive`, `send-only` and conservative `receive-only` policies. Existing folders remain bidirectional. Receive-only protects local edits and prevents upstream entry transfer; it does not silently force a mirror or resolve pre-existing conflicts.
+- Negotiate folder directions on every transfer lane and enforce local policy before sending, receiving and publication. Require wire protocol 6; upgrade both peers together. Retain identities, configuration, indexed history, retained versions, conflicts and lane cursors.
+- Add `folder add --mode` and `folder mode ID MODE`. Policy changes require the daemon to be stopped and hold its lock. Show direction in the TUI/JSON and distinguish disabled sending from delivered queues.
+- Expand correctness coverage for receiver-initiated sessions, mode mismatch, opposite folder flows, receiver divergence, publication cancellation, older-protocol rejection and repeated crash/offline-edit sequences.
+- Add distinct reproducible benchmark contents and repeated trials with latency/CPU observations. Record the evidence and its limitations; correct README drift about lanes, caches, retention and historical validation. No comparative performance win is claimed.
+
 ## 0.3.3
 
 - Show per-peer outbound delivery queues in the TUI using durable lane acknowledgements. Distinguish offline peers, unknown lanes, scanning and conflicts; report logical queued bytes and metadata records. Preserve snapshot-only dashboard reads and wire protocol 5 compatibility with 0.3.2.

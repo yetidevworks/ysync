@@ -18,6 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+const PROTOCOL_VERSION: u32 = 6;
 const CHUNK: usize = 60 * 1024;
 const MAX_JSON: usize = 4 * 1024 * 1024;
 #[derive(Serialize, Deserialize, Debug)]
@@ -29,7 +30,7 @@ enum Message {
     Hello {
         version: u32,
         name: String,
-        folders: Vec<String>,
+        folders: BTreeMap<String, config::FolderMode>,
         cursors: BTreeMap<String, u64>,
     },
     Denied {
@@ -243,18 +244,18 @@ fn hello(shared: &Shared, peer: &str, lane: crate::lanes::Lane) -> Result<Messag
         .find(|p| p.id == peer && p.approved)
         .context("device awaiting approval")?;
     let c = store::open(&shared.home)?;
-    let folders: Vec<String> = cfg
+    let folders: BTreeMap<String, config::FolderMode> = cfg
         .folders
         .iter()
         .filter(|f| !f.paused && p.folders.contains(&f.id) && shared.ready(&f.id))
-        .map(|f| f.id.clone())
+        .map(|f| (f.id.clone(), f.mode))
         .collect();
     let mut cursors = BTreeMap::new();
-    for f in &folders {
+    for f in folders.keys() {
         cursors.insert(f.clone(), store::lane_cursor(&c, peer, f, lane)?);
     }
     Ok(Message::Hello {
-        version: 5,
+        version: PROTOCOL_VERSION,
         name: cfg.name,
         folders,
         cursors,
@@ -308,6 +309,19 @@ fn root(shared: &Shared, peer: &str, folder: &str) -> Result<Root> {
     root.read_cache = Some(shared.read_cache.clone());
     Ok(root)
 }
+fn directional_root(shared: &Shared, peer: &str, folder: &str, sending: bool) -> Result<Root> {
+    let root = root(shared, peer, folder)?;
+    let mode = root.folder.mode;
+    if (sending && !mode.can_send()) || (!sending && !mode.can_receive()) {
+        bail!(
+            "folder {folder} is {}; {} prohibited",
+            mode.as_str(),
+            if sending { "sending" } else { "receiving" }
+        );
+    }
+    Ok(root)
+}
+
 enum SourceReader {
     Disk(cap_std::fs::File),
     Memory(std::io::Cursor<Arc<[u8]>>),
@@ -503,7 +517,7 @@ fn receive_delta(
 }
 
 fn send_batch(w: &mut Wire, shared: &Shared, folder: &str, after: u64) -> Result<u64> {
-    let root = root(shared, &w.peer, folder)?;
+    let root = directional_root(shared, &w.peer, folder, true)?;
     root.check()?;
     let c = store::open(&shared.home)?;
     let (entries, upto) = store::lane_changes(&c, folder, after, w.lane)?;
@@ -728,7 +742,7 @@ fn receive_batch(w: &mut Wire, shared: &Shared, expected_folder: &str) -> Result
         bail!("entry assigned to wrong transfer lane");
     }
     let lane = w.lane;
-    let mut root = root(shared, &w.peer, &folder)?;
+    let mut root = directional_root(shared, &w.peer, &folder, false)?;
     let control = Arc::new(crate::scanning::ScanControl::default());
     root.scan_control = Some(control.clone());
     let peer = w.peer.clone();
@@ -740,7 +754,7 @@ fn receive_batch(w: &mut Wire, shared: &Shared, expected_folder: &str) -> Result
             if shared.stopping() {
                 bail!("daemon stopping");
             }
-            self::root(shared, peer, folder)?.check()?;
+            directional_root(shared, peer, folder, false)?.check()?;
             if !reported {
                 shared.event("preparing", Some(folder), detail);
                 reported = true;
@@ -945,7 +959,7 @@ fn receive_batch(w: &mut Wire, shared: &Shared, expected_folder: &str) -> Result
                         }
                     }
                     // Recheck permissions and pause/revocation after the data transfer, before any publication.
-                    let _ = self::root(shared, peer, folder)?;
+                    let _ = directional_root(shared, peer, folder, false)?;
                     let tx =
                         c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                     // Children must be removed before their deleted parents, irrespective of journal order.
@@ -1056,13 +1070,14 @@ pub fn session_lane(
         };
         offered.validate()?;
         w.send(&Message::Lane {
-            version: 5,
+            version: PROTOCOL_VERSION,
             lane: offered,
         })?;
         match w.recv()? {
-            Message::Lane { version: 5, lane }
-                if lane.index == index && lane.count <= configured =>
-            {
+            Message::Lane {
+                version: PROTOCOL_VERSION,
+                lane,
+            } if lane.index == index && lane.count <= configured => {
                 lane.validate()?;
                 lane
             }
@@ -1071,7 +1086,10 @@ pub fn session_lane(
         }
     } else {
         let offered = match w.recv()? {
-            Message::Lane { version: 5, lane } => lane,
+            Message::Lane {
+                version: PROTOCOL_VERSION,
+                lane,
+            } => lane,
             _ => bail!("incompatible protocol; update both peers"),
         };
         offered.validate()?;
@@ -1085,7 +1103,10 @@ pub fn session_lane(
             })?;
             bail!("lane exceeds negotiated limit");
         }
-        w.send(&Message::Lane { version: 5, lane })?;
+        w.send(&Message::Lane {
+            version: PROTOCOL_VERSION,
+            lane,
+        })?;
         lane
     };
     w.lane = lane;
@@ -1102,7 +1123,7 @@ pub fn session_lane(
         w.send(&hello(&shared, &peer, lane)?)?;
         let (remote_folders, mut remote_cursors) = match w.recv()? {
             Message::Hello {
-                version: 5,
+                version: PROTOCOL_VERSION,
                 folders,
                 cursors,
                 ..
@@ -1114,11 +1135,12 @@ pub fn session_lane(
             Message::Hello { folders, .. } => folders,
             _ => unreachable!(),
         };
-        let mut folders: Vec<_> = local
-            .into_iter()
-            .filter(|f| remote_folders.contains(f))
+        let folders: Vec<_> = local
+            .keys()
+            .filter(|f| remote_folders.contains_key(*f))
+            .cloned()
             .collect();
-        folders.sort();
+        shared.delivery.remote_modes(&peer, remote_folders.clone());
         for folder in &folders {
             shared.delivery.acknowledged(
                 &peer,
@@ -1130,6 +1152,14 @@ pub fn session_lane(
         if folders.is_empty() {
             bail!("no approved, scanned folders in common");
         }
+        if !folders.iter().any(|f| {
+            (local[f].can_send() && remote_folders[f].can_receive())
+                || (local[f].can_receive() && remote_folders[f].can_send())
+        }) {
+            bail!(
+                "folder direction mismatch: no permitted transfer direction (send-only needs a receiver; receive-only needs a sender)"
+            );
+        }
         let started = Instant::now();
         let mut idle_rounds = 0u64;
         while !shared.stopping() {
@@ -1138,16 +1168,24 @@ pub fn session_lane(
             }
             w.progress = false;
             for f in &folders {
-                if initiator {
+                // Changes require reconnect before using a newly permitted direction.
+                // The CLI holds the daemon lock when changing policy; this check also
+                // detects hand-edited configurations without sending a forbidden batch.
+                if root(&shared, &peer, f)?.folder.mode != local[f] {
+                    bail!("folder direction changed; reconnect");
+                }
+                let send = local[f].can_send() && remote_folders[f].can_receive();
+                let receive = local[f].can_receive() && remote_folders[f].can_send();
+                if !initiator && receive {
+                    receive_batch(&mut w, &shared, f)?;
+                }
+                if send {
                     let n = send_batch(&mut w, &shared, f, *remote_cursors.get(f).unwrap_or(&0))?;
                     w.progress |= n > *remote_cursors.get(f).unwrap_or(&0);
                     remote_cursors.insert(f.clone(), n);
+                }
+                if initiator && receive {
                     receive_batch(&mut w, &shared, f)?;
-                } else {
-                    receive_batch(&mut w, &shared, f)?;
-                    let n = send_batch(&mut w, &shared, f, *remote_cursors.get(f).unwrap_or(&0))?;
-                    w.progress |= n > *remote_cursors.get(f).unwrap_or(&0);
-                    remote_cursors.insert(f.clone(), n);
                 }
             }
             // Brief fairness yield; large bootstrap batches continue without a per-file round trip.
@@ -1238,6 +1276,7 @@ mod tests {
         Pause,
         Disconnect,
         StoreBusy,
+        DirectionChange,
     }
 
     #[test]
@@ -1256,6 +1295,11 @@ mod tests {
     #[test]
     fn receiver_preflight_survives_database_writer_delay() {
         delayed_receiver(GateAction::StoreBusy);
+    }
+
+    #[test]
+    fn send_only_policy_cancels_receiver_before_publication() {
+        delayed_receiver(GateAction::DirectionChange);
     }
 
     fn delayed_receiver(action: GateAction) {
@@ -1342,6 +1386,11 @@ mod tests {
                     Ok(())
                 })
                 .unwrap(),
+                GateAction::DirectionChange => config::edit(receiver_home.path(), |c| {
+                    c.folders[0].mode = config::FolderMode::SendOnly;
+                    Ok(())
+                })
+                .unwrap(),
                 GateAction::Disconnect => socket.shutdown(std::net::Shutdown::Both).unwrap(),
             }
             let cancelled = matches!(action, GateAction::Release | GateAction::StoreBusy)
@@ -1351,7 +1400,10 @@ mod tests {
             let received = receiver_task.join().unwrap();
             (sent, received, cancelled)
         });
-        if matches!(action, GateAction::Pause | GateAction::Disconnect) {
+        if matches!(
+            action,
+            GateAction::Pause | GateAction::Disconnect | GateAction::DirectionChange
+        ) {
             assert!(
                 result.2,
                 "cancelled receiver remained blocked on scanner gate"
@@ -1389,6 +1441,50 @@ mod tests {
             .unwrap(),
             result.0.unwrap()
         );
+    }
+
+    #[test]
+    fn protocol_five_is_refused_before_any_folder_exchange() {
+        let sender = tempfile::tempdir().unwrap();
+        let receiver = tempfile::tempdir().unwrap();
+        let sid = config::initialize(sender.path(), None, None).unwrap();
+        let rid = config::initialize(receiver.path(), None, None).unwrap();
+        config::edit(receiver.path(), |c| {
+            c.peers.push(config::Peer {
+                id: sid,
+                name: "old peer".into(),
+                address: None,
+                approved: true,
+                folders: vec![],
+            });
+            Ok(())
+        })
+        .unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shared = Arc::new(Shared::new(receiver.path(), rid.clone(), String::new()));
+        let task =
+            std::thread::spawn(move || session(listener.accept().unwrap().0, shared, None, false));
+        let mut wire = Wire::handshake(
+            TcpStream::connect(addr).unwrap(),
+            sender.path(),
+            Some(&rid),
+            true,
+        )
+        .unwrap();
+        wire.send(&Message::Lane {
+            version: 5,
+            lane: Default::default(),
+        })
+        .unwrap();
+        assert!(
+            task.join()
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("incompatible protocol")
+        );
+        assert!(wire.recv().is_err());
     }
 
     #[test]

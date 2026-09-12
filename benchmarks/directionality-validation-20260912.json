@@ -1,0 +1,52 @@
+{
+  "date": "2026-09-12",
+  "version": "0.4.0-dev",
+  "protocol": 6,
+  "source_code_sha256": "78b2585aea031b88685fe5416f3c723d61a7a2e7a178d30252e15fbfe0c453ad",
+  "source_hash_method": "Sorted relative Cargo.toml/Cargo.lock/src/**/*.rs/tests/**/*.rs names and bytes, each NUL delimited",
+  "local_release_sha256": "6469ba0d63613ae6a0a68c9167f1e35b1977f7057a41e4931a78cab686f06659",
+  "linux_release_sha256": "4a39187977401ec55b5b94d35a64c8fe9ed2b7c7392c35ff9f5572e3ce82c2f1",
+  "validation": {
+    "macos": {
+      "unit_tests_passed": 89,
+      "integration_tests_passed": 25
+    },
+    "linux": {
+      "unit_tests_passed": 93,
+      "integration_tests_passed": 25,
+      "native_watchers_required": true,
+      "test_threads": 2
+    },
+    "execution_note": "Full suites passed with 88/92 unit and 24 integration tests; subsequently added protocol-5 rejection and opposite-per-folder-flow tests passed independently on both platforms.",
+    "clippy": "passed, all targets, warnings denied",
+    "format": "passed",
+    "monitor_pty": "passed input, resize, termination/restoration and conflict review",
+    "python_packaging_tests": 4
+  },
+  "correctness_scenarios": [
+    "legacy default and invalid mode",
+    "source or receiver initiating one-way sessions",
+    "metadata and bulk lanes",
+    "receiver local work preserved, never sent upstream",
+    "source deletion and receiver restart",
+    "mode change refused while daemon active",
+    "same-mode incompatibility diagnosed",
+    "opposite folder flows in a shared connection",
+    "send-only publication cancellation while waiting on scanner gate",
+    "protocol 5 refused before folder exchange",
+    "eight deterministic offline edit/rename/delete rounds with process kills and exact expected-file-map checks"
+  ],
+  "limits": [
+    "No release/deployment performed",
+    "No actual reboot, power-loss or long-term soak",
+    "No independent audit",
+    "No controlled competitor comparison"
+  ],
+  "live_services": {
+    "version": "0.3.3",
+    "mac_pid": 83155,
+    "linux_pid": 1580925,
+    "restarted": false,
+    "active_folder_conflicts": 0
+  }
+}

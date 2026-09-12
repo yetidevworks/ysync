@@ -915,6 +915,16 @@ pub fn temp_file(root: &Root) -> Result<(String, std::fs::File)> {
 }
 
 pub fn add_folder(home: &Path, id: &str, path: &Path, dev: bool) -> Result<()> {
+    add_folder_with_mode(home, id, path, dev, Default::default())
+}
+
+pub fn add_folder_with_mode(
+    home: &Path,
+    id: &str,
+    path: &Path,
+    dev: bool,
+    mode: crate::config::FolderMode,
+) -> Result<()> {
     crate::config::valid_folder_id(id)?;
     let path = std::fs::canonicalize(path).context("folder must already exist")?;
     if !path.is_dir() {
@@ -948,6 +958,7 @@ pub fn add_folder(home: &Path, id: &str, path: &Path, dev: bool) -> Result<()> {
             path,
             marker,
             paused: false,
+            mode,
             ignores: if dev {
                 crate::config::dev_ignores()
             } else {

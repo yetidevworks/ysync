@@ -1,8 +1,10 @@
 # ysync
 
-Direct, encrypted, bidirectional file synchronization for macOS and Linux. A Rust daemon, a live terminal monitor, explicit device approval, and native user services.
+Direct, encrypted file synchronization for macOS and Linux. A Rust daemon, a live terminal monitor, explicit device approval, and native user services.
 
 **Status: experimental 0.3.** Use disposable folders or copies while evaluating. This implementation is not yet a proven replacement for Syncthing on a multi-million-file production tree. Do not run two sync engines against the same live folders.
+
+Version **0.4.0** adds explicit folder directions and uses **wire protocol 6**. Upgrade both peers together; 0.3.2–0.3.3 peers use protocol 5 and cannot synchronize with 0.4.0. Existing configurations remain bidirectional until you explicitly change a folder mode.
 
 ## Install
 
@@ -26,13 +28,13 @@ Use Rust/Cargo 1.88 or newer and a C compiler. SQLite is bundled; no separate SQ
 
 ```sh
 cargo install --git https://github.com/yetidevworks/ysync.git \
-  --tag v0.3.3 --locked ysync
+  --tag v0.4.0 --locked ysync
 ysync --version
 ```
 
 Cargo installs the command under `~/.cargo/bin`; make sure that directory is on your PATH. With a rustup installation, `source "$HOME/.cargo/env"` activates it in the current shell. Installation builds the binary but does not start a service or change your sync configuration. This crate is not published to crates.io. Cargo's [Git installation options](https://doc.rust-lang.org/cargo/commands/cargo-install.html) support selecting a tag and using the committed dependency lockfile.
 
-For the latest main branch, replace `--tag v0.3.3` with `--branch main`. To update an installed service: stop it, install the desired tag with `--force`, and start it again. Reinstall the service definition if the binary's installation path changes.
+For the latest main branch, replace `--tag v0.4.0` with `--branch main`. To update an installed service: stop it, install the desired tag with `--force`, and start it again. Reinstall the service definition if the binary's installation path changes.
 
 ### Download a binary
 
@@ -50,13 +52,13 @@ Linux archives require glibc 2.35 or newer. Build with Cargo on older systems. M
 For example, on an Apple Silicon Mac:
 
 ```sh
-curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.3.3/ysync-v0.3.3-aarch64-apple-darwin.tar.gz
-curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.3.3/SHA256SUMS
-shasum -a 256 ysync-v0.3.3-aarch64-apple-darwin.tar.gz
+curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.4.0/ysync-v0.4.0-aarch64-apple-darwin.tar.gz
+curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.4.0/SHA256SUMS
+shasum -a 256 ysync-v0.4.0-aarch64-apple-darwin.tar.gz
 # Compare the result with its matching entry in SHA256SUMS.
-tar -xzf ysync-v0.3.3-aarch64-apple-darwin.tar.gz
+tar -xzf ysync-v0.4.0-aarch64-apple-darwin.tar.gz
 mkdir -p ~/.local/bin
-install -m 755 ysync-v0.3.3-aarch64-apple-darwin/ysync ~/.local/bin/ysync
+install -m 755 ysync-v0.4.0-aarch64-apple-darwin/ysync ~/.local/bin/ysync
 ```
 
 Put `~/.local/bin` on your PATH if you use this location. `ysync --help` shows all commands.
@@ -304,6 +306,44 @@ ysync service uninstall
 
 Only one installed service is supported per OS user. `--home` supports separate foreground instances for tests. The service command embeds the binary's absolute path; reinstall the service if you move the binary.
 
+## Folder direction policies
+
+Each folder has an explicit local mode. Existing configurations default to `send-receive`.
+
+| Mode | Sends indexed changes | Accepts incoming changes | Local edits |
+| --- | --- | --- | --- |
+| `send-receive` | Yes, if the peer accepts them | Yes, if the peer sends them | Normal causal conflict protection |
+| `send-only` | Yes, if the peer accepts them | Never | This device's working files cannot be changed by peers |
+| `receive-only` | Never, including metadata/deletions | Yes, if the peer sends them | Still scanned; retained locally and protected if an incoming change conflicts |
+
+For an authoritative Mac with a Linux copy, use `send-only` on the Mac and `receive-only` on Linux. The receiver can initiate the connection; dialing does not determine direction. Both ends enforce their local policy, and the encrypted handshake negotiates the permitted directions per folder on every lane. Two send-only folders or two receive-only folders have no permitted direction; a connection with no usable folders reports a direction mismatch.
+
+For new folders, choose the policy when adding them:
+
+```sh
+# Mac
+ysync folder add projects ~/Projects --mode send-only --dev
+# Linux
+ysync folder add projects ~/Projects --mode receive-only --dev
+```
+
+For an existing folder, stop that machine's configured daemon/service before changing its policy. The command holds the daemon lock and refuses to run while the daemon is active:
+
+```sh
+# On the Mac, with its daemon stopped:
+ysync folder mode projects send-only
+# On Linux, with its daemon stopped:
+ysync folder mode projects receive-only
+# Inspect on either side, then restart the configured service:
+ysync folder list
+```
+
+Changing a mode retains files, version vectors, delivery cursors and pending conflicts. It does not select a winner for pre-existing differences: use the reviewed initial-pairing workflow when establishing a source baseline. Switching back to `send-receive` permits previously unsent local changes to participate in synchronization. Pause/review those changes before doing so. Edit policy through the command while stopped, rather than editing configuration during transfers.
+
+`receive-only` is a conservative receiver, not an automatic destructive mirror. An accidental receiver edit is never sent upstream and is not silently discarded. A later conflicting source edit is archived for review while the receiver's working content remains. Receiver-only files/deletions can therefore remain local differences; an unchanged source is not automatically replayed to revert them. Continuous forced mirroring and a local-difference/revert panel are not implemented. Send-only likewise does not force its contents over independently modified receivers. Directionality does not provide application-consistent database snapshots.
+
+The TUI folder table/details and JSON status include `mode`. Outbound delivery says `sending disabled` for blocked directions instead of falsely displaying an empty, delivered queue. The receiver's scanner and conflict indicators still matter; a disabled direction is not proof that both trees match.
+
 ## Exclusions and state
 
 `folder add --dev` ignores common regenerable directories, including `node_modules`, `.venv`, `venv`, `target`, `dist`, `build`, `.next`, and caches. It does **not** automatically ignore `.git`, secrets, `vendor`, or arbitrary source files. Decide what belongs on each approved peer.
@@ -342,7 +382,7 @@ Persistent chunk signatures live in `chunk-cache.sqlite` under the private state
 
 Delta selection requires estimated payload reuse to cover signature/plan metadata plus at least 5% of the remaining file or 256 KiB, whichever is larger. An ineffective attempt streams instead and skips delta negotiation for the next three attempts on that peer/path before probing again. `--chunk-cache-mib 0` disables persistent signatures and this history, while retaining the immediate savings check. The maximum budget is 1,024 MiB. Retention settings do not govern these disposable caches.
 
-`status --json` exposes diagnostic counters: `source_read_bytes` counts transfer-side file reads (excluding scanner reads and not physical device I/O), `scan_cache_reused_bytes` counts cached payload selected for send attempts, `signature_cache_hits` and `signature_indexed_bytes` track signature work, and `delta_fallbacks` counts rejected/skipped deltas. These are per-run work counters, not unique committed bytes. The TUI layout is unchanged.
+`status --json` exposes diagnostic counters: `source_read_bytes` counts transfer-side file reads (excluding scanner reads and not physical device I/O), `scan_cache_reused_bytes` counts cached payload selected for send attempts, `signature_cache_hits` and `signature_indexed_bytes` track signature work, and `delta_fallbacks` counts rejected/skipped deltas. These are per-run work counters, not unique committed bytes. The TUI summarizes activity and outbound delivery; detailed work counters remain available in JSON.
 
 ## How it works
 
@@ -366,9 +406,9 @@ Implemented: regular files, empty directories, relative/absolute symlinks (never
 
 Not implemented yet:
 
-- Cross-file deduplication, compression, multiple bulk lanes, or persistent chunk indexes. Delta reuse is limited to the existing destination at the same relative path; unrelated data and files without an eligible basis stream in full. An interruption during batch publication can still require retransmitting files already moved out of the staging area.
-- Single-read bootstrap: the first version hashes a source file when indexing, then reads and verifies it while transmitting. The index/transfer stages overlap, but this still reads source bytes twice.
-- mDNS/global discovery, NAT traversal/relays, web/mobile interfaces, rate schedules, bandwidth caps, folder invitation UI. Configurable archive retention is implemented in the unreleased development build.
+- Cross-file deduplication or compression. Multiple transfer lanes and persistent chunk indexes shipped in 0.3.2. Delta reuse is limited to the existing destination at the same relative path; unrelated data and files without an eligible basis stream in full. An interruption during batch publication can still require retransmitting files already moved out of the staging area.
+- Universal single-read bootstrap: the bounded 0.3.2 scan-to-send RAM cache reuses files up to 8 MiB when available. Larger/evicted files still require a transfer read after indexing.
+- mDNS/global discovery, NAT traversal/relays, web/mobile interfaces, rate schedules, bandwidth caps, folder invitation UI. Configurable archive retention shipped in 0.3.2.
 - POSIX owners/groups, ACLs, extended attributes/resource forks, hard-link identity, sparse extents, modification-time preservation, non-UTF-8 filenames, or application-consistent snapshots.
 - Automated file/directory type-conflict resolution when a directory must be replaced. These are reported for manual resolution to avoid deleting a populated subtree.
 
@@ -377,6 +417,16 @@ Active databases, VM images, and simultaneous Git operations across machines nee
 ## Validation and benchmarking
 
 `python3 scripts/check_service_lifecycle.py --binary /absolute/path/to/ysync --cycles 12 --output /tmp/ysync-service-check.json` tests the generated native user-service definitions with unique job names, disposable identities, and two isolated sync roots. It verifies login enablement, clean stops/starts, automatic crash recovery, offline edits, reverse changes, Unix permissions, symlinks, deletion, retained originals, durable delivery queues and service removal. It requires the current user's launchd GUI domain or systemd user manager and never controls the normal ysync/Homebrew service. CI runs three cycles on Ubuntu and macOS. This checks login configuration, not an actual reboot/logout; longer operational evaluation and additional metadata fidelity remain open.
+
+For repeated isolated evidence with distinct reproducible file contents, raw trials, edit-latency samples and per-daemon CPU observations:
+
+```sh
+python3 scripts/benchmark_repeated.py --binary /absolute/path/to/ysync \
+  --one-way --trials 3 --files 2000 --size 4096 \
+  --edit-samples 20 --idle-seconds 10 --output /tmp/ysync-small-files.json
+```
+
+These are loopback trials with uncontrolled OS caches, not a competitor comparison or cold-cache result. See [BENCHMARKING.md](BENCHMARKING.md) for the evidence gates and comparison protocol.
 
 See [VALIDATION.md](VALIDATION.md) for measured results on macOS and `home-omarchy`, native watcher coverage, and remaining validation gaps.
 
@@ -392,7 +442,7 @@ The benchmark creates two isolated local instances and reports bootstrap duratio
 
 Run `cargo bench --bench delta --locked` for the synthetic content-defined versus fixed-block comparison, or add `--delta --files 1 --size 33554432` to the SSH benchmark for a 32 MiB test file with three edits.
 
-See [ROADMAP.md](ROADMAP.md) for upcoming performance and operational work. The 0.3.2 transfer-lane build uses **wire protocol 5**; update both peers together. Earlier protocol versions are rejected before exchanging transfer batches. Identities, configuration, indexed versions, and partial buffers are retained; lane cursors and partial change indexes are added. The first upgraded startup builds those indexes over the existing entries. Upgrade both devices before reconnecting. Protocol 3 peers (0.1.x) are refused before exchanging batches so their automatic conflict policy cannot participate.
+See [ROADMAP.md](ROADMAP.md) for upcoming performance and operational work. Releases 0.3.2–0.3.3 use **wire protocol 5**. Version 0.4.0 uses **wire protocol 6** and refuses protocol 5 before any folder exchange; upgrade both peers together. Existing folders default to send-receive, and policy negotiation does not reset causal history or lane cursors. Earlier protocol versions are rejected before exchanging transfer batches. Identities, configuration, indexed versions, and partial buffers are retained. The earlier upgrade to protocol 5 added lane cursors and partial change indexes; those indexes are built on first startup when upgrading from an older state. Upgrade both devices before reconnecting. Protocol 3 peers (0.1.x) are refused before exchanging batches so their automatic conflict policy cannot participate.
 
 ## License
 
