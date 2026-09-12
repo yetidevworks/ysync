@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.3
+
+- Show per-peer outbound delivery queues in the TUI using durable lane acknowledgements. Distinguish offline peers, unknown lanes, scanning and conflicts; report logical queued bytes and metadata records. Preserve snapshot-only dashboard reads and wire protocol 5 compatibility with 0.3.2.
+- Bound background queue counting, cache unchanged results, skip entry queries when delivery is current, and mark incomplete counts as lower bounds.
+- Add native launchd/systemd service lifecycle checks to CI, covering login enablement, stop/start, crash recovery, offline and reverse edits, metadata, deletions, retained originals and cleanup. Actual reboot/logout and longer stability trials remain open.
+- Publish delta-efficiency test edits atomically and cover visible truncation/full replacement/delta recovery separately, retaining strict byte-saving assertions.
+
 ## 0.3.2
 
 - Explicitly release offline-operation locks at scope exit, even when a subprocess temporarily inherits a duplicate descriptor. Preserve running-daemon refusal. The 0.3.1 tag failed this release test and was not published.
