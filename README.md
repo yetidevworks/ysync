@@ -26,13 +26,13 @@ Use Rust/Cargo 1.88 or newer and a C compiler. SQLite is bundled; no separate SQ
 
 ```sh
 cargo install --git https://github.com/yetidevworks/ysync.git \
-  --tag v0.3.0 --locked ysync
+  --tag v0.3.1 --locked ysync
 ysync --version
 ```
 
 Cargo installs the command under `~/.cargo/bin`; make sure that directory is on your PATH. With a rustup installation, `source "$HOME/.cargo/env"` activates it in the current shell. Installation builds the binary but does not start a service or change your sync configuration. This crate is not published to crates.io. Cargo's [Git installation options](https://doc.rust-lang.org/cargo/commands/cargo-install.html) support selecting a tag and using the committed dependency lockfile.
 
-For the latest main branch, replace `--tag v0.3.0` with `--branch main`. To update an installed service: stop it, install the desired tag with `--force`, and start it again. Reinstall the service definition if the binary's installation path changes.
+For the latest main branch, replace `--tag v0.3.1` with `--branch main`. To update an installed service: stop it, install the desired tag with `--force`, and start it again. Reinstall the service definition if the binary's installation path changes.
 
 ### Download a binary
 
@@ -50,13 +50,13 @@ Linux archives require glibc 2.35 or newer. Build with Cargo on older systems. M
 For example, on an Apple Silicon Mac:
 
 ```sh
-curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.3.0/ysync-v0.3.0-aarch64-apple-darwin.tar.gz
-curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.3.0/SHA256SUMS
-shasum -a 256 ysync-v0.3.0-aarch64-apple-darwin.tar.gz
+curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.3.1/ysync-v0.3.1-aarch64-apple-darwin.tar.gz
+curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.3.1/SHA256SUMS
+shasum -a 256 ysync-v0.3.1-aarch64-apple-darwin.tar.gz
 # Compare the result with its matching entry in SHA256SUMS.
-tar -xzf ysync-v0.3.0-aarch64-apple-darwin.tar.gz
+tar -xzf ysync-v0.3.1-aarch64-apple-darwin.tar.gz
 mkdir -p ~/.local/bin
-install -m 755 ysync-v0.3.0-aarch64-apple-darwin/ysync ~/.local/bin/ysync
+install -m 755 ysync-v0.3.1-aarch64-apple-darwin/ysync ~/.local/bin/ysync
 ```
 
 Put `~/.local/bin` on your PATH if you use this location. `ysync --help` shows all commands.
@@ -118,7 +118,7 @@ Compare `MAC_DEVICE_ID` with the fingerprint shown on the Mac before approving. 
 
 The default listener is TCP port **39280**, on all IPv4 interfaces. Use `init --listen 127.0.0.1:39280` for a loopback-only instance, or bind a specific LAN/Tailscale address. Allow inbound TCP 39280 on the listening machine. There is no discovery service, relay, or cloud account.
 
-## Review initial pairing (0.3.0)
+## Review initial pairing (0.3.1)
 
 Normal pairing uses **merge**: identical versions reconcile, new files transfer, and independent differences are preserved as conflicts. When one machine is deliberately the source for an existing copy, use a one-time **seed-local** plan before granting folder access. Seeding establishes a common history; it does not permanently make the folder one-way.
 
@@ -226,7 +226,7 @@ ysync conflict resolve projects FULL_CONFLICT_ID --keep-local
 
 This command does not copy anything over the working file. It records the current local version as a deliberate resolution of the selected incoming version. When synchronization resumes, that decision propagates. To choose incoming content, first review and copy/merge the saved payload into the working file, then run the same explicit resolution command. Archives remain retained. Conflicting edits made after the choice produce a new conflict.
 
-## Archive retention (0.3.0)
+## Archive retention (0.3.1)
 
 Retention is disabled by default. Configure per-folder age/space limits, then inspect a dry run:
 
@@ -322,9 +322,9 @@ Daemon state is separate from synced files:
 
 Use `ysync --home /absolute/path ...` to select another state directory. It contains private device keys, configuration, the SQLite index/cursors, and monitoring snapshots. Keep it outside all synchronized folders.
 
-## Transfer tuning (0.3.0)
+## Transfer tuning (0.3.1)
 
-Version 0.3.0 uses three encrypted transfer lanes per peer by default: one for metadata and files smaller than 1 MiB, and two for larger files. Small edits can proceed while a bulk lane is busy. Paths stay on a stable bulk lane; each bulk batch carries one payload. Parent metadata must be committed before a bulk file is published. Independent lane cursors retain durable acknowledgment and safe reconnect behavior. Both peers negotiate the smaller configured lane count.
+Version 0.3.1 uses three encrypted transfer lanes per peer by default: one for metadata and files smaller than 1 MiB, and two for larger files. Small edits can proceed while a bulk lane is busy. Paths stay on a stable bulk lane; each bulk batch carries one payload. Parent metadata must be committed before a bulk file is published. Independent lane cursors retain durable acknowledgment and safe reconnect behavior. Both peers negotiate the smaller configured lane count.
 
 ```sh
 ysync init --transfer-lanes 3 --send-cache-mib 64 --chunk-cache-mib 64
@@ -386,7 +386,7 @@ The benchmark creates two isolated local instances and reports bootstrap duratio
 
 Run `cargo bench --bench delta --locked` for the synthetic content-defined versus fixed-block comparison, or add `--delta --files 1 --size 33554432` to the SSH benchmark for a 32 MiB test file with three edits.
 
-See [ROADMAP.md](ROADMAP.md) for upcoming performance and operational work. The 0.3.0 transfer-lane build uses **wire protocol 5**; update both peers together. Earlier protocol versions are rejected before exchanging transfer batches. Identities, configuration, indexed versions, and partial buffers are retained; lane cursors and partial change indexes are added. The first upgraded startup builds those indexes over the existing entries. Upgrade both devices before reconnecting. Protocol 3 peers (0.1.x) are refused before exchanging batches so their automatic conflict policy cannot participate.
+See [ROADMAP.md](ROADMAP.md) for upcoming performance and operational work. The 0.3.1 transfer-lane build uses **wire protocol 5**; update both peers together. Earlier protocol versions are rejected before exchanging transfer batches. Identities, configuration, indexed versions, and partial buffers are retained; lane cursors and partial change indexes are added. The first upgraded startup builds those indexes over the existing entries. Upgrade both devices before reconnecting. Protocol 3 peers (0.1.x) are refused before exchanging batches so their automatic conflict policy cannot participate.
 
 ## License
 

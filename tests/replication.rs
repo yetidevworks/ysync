@@ -1165,7 +1165,8 @@ fn ineffective_delta_streams_next_version_without_signature_reads() {
     });
     settled(&a, &b);
     wait("fallback counters", &a, &b, || {
-        ysync::daemon::read_status(a.state.path()).is_ok_and(|s| s.delta_fallbacks == 1)
+        ysync::daemon::read_status(a.state.path())
+            .is_ok_and(|s| s.delta_fallbacks == 1 && s.sent_bytes == 2 * data.len() as u64)
     });
     let before = ysync::daemon::read_status(a.state.path()).unwrap();
     for byte in &mut data {

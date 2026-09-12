@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.3.0
+## 0.3.1
+
+- Wait for complete status accounting in the adaptive-delta regression before measuring the next transfer. The 0.3.0 tag failed this release test and was not published.
 
 - Add negotiated transfer lanes (default three, maximum eight), separating metadata/small edits from bounded bulk transfers. Preserve parent ordering, causal conflict checks, durable lane cursors, reconnect/layout migration, and back off idle exchanges.
 - Reuse scanned payloads through a bounded RAM cache (default 64 MiB, files up to 8 MiB); retain normal reads for cache misses and larger files.

@@ -18,16 +18,16 @@
 - [x] Conflict safety: preserve working content for independent/concurrent versions, retain durable pending conflicts, require explicit CLI resolution, and refuse peers using the older automatic conflict policy.
 
 - [x] Ratatui monitoring and guarded conflict review with verified previews and explicit keep-local confirmation (0.2.5–0.2.6).
-- [x] Initial pairing workflow: receiver metadata export, merge/seed-local preview, paginated plan inspection, and atomic explicit source baselines (0.3.0). No permanent one-way mode; new independent receiver edits remain protected.
-- [x] Retention controls: dry runs, age/space limits, manual cleanup, and separately opt-in automatic maintenance. Unresolved/uncommitted conflicts and locked partials are protected (0.3.0). Very large archive directories and unsupported legacy artifacts still require manual maintenance.
+- [x] Initial pairing workflow: receiver metadata export, merge/seed-local preview, paginated plan inspection, and atomic explicit source baselines (0.3.1). No permanent one-way mode; new independent receiver edits remain protected.
+- [x] Retention controls: dry runs, age/space limits, manual cleanup, and separately opt-in automatic maintenance. Unresolved/uncommitted conflicts and locked partials are protected (0.3.1). Very large archive directories and unsupported legacy artifacts still require manual maintenance.
 
 ## Next performance work
 
 Temperature-aware scanner pause/resume is implemented and covered by controlled tests. A scanner CPU/duty budget independent of worker count and a controlled large-root cooling evaluation remain. The first path-opening optimization is measured in VALIDATION.md; larger controlled follow-up remains. Track initial indexing separately from idle watching and scoped edits. Two hash workers and a later 50% CPU quota did not prevent every Linux trial from reaching its 85°C stop threshold. The server deliberately uses a shallow fan curve: keep temperature control optional, and assess efficiency through CPU seconds, disk reads, repeated work, and idle activity.
 
-- [x] Negotiated transfer lanes with bounded resource use (0.3.0). One metadata/small-edit lane and stable bulk lanes; independent durable cursors and parent ordering. Configurable separately from hashing. Controlled blocked-bulk and layout migration tests pass.
-- [x] Bounded single-read initial fast path (0.3.0). Reuse scanned payloads up to 8 MiB from a configurable RAM cache. Larger/evicted files still need another read; universal streaming handoff remains future work.
-- [x] Persistent chunk indexes and adaptive delta selection (0.3.0). Reuse verified fingerprint-bound signatures and received layouts across restarts; fall back when savings are poor and temporarily skip subsequent probes.
+- [x] Negotiated transfer lanes with bounded resource use (0.3.1). One metadata/small-edit lane and stable bulk lanes; independent durable cursors and parent ordering. Configurable separately from hashing. Controlled blocked-bulk and layout migration tests pass.
+- [x] Bounded single-read initial fast path (0.3.1). Reuse scanned payloads up to 8 MiB from a configurable RAM cache. Larger/evicted files still need another read; universal streaming handoff remains future work.
+- [x] Persistent chunk indexes and adaptive delta selection (0.3.1). Reuse verified fingerprint-bound signatures and received layouts across restarts; fall back when savings are poor and temporarily skip subsequent probes.
 - [ ] Representative LAN/disk benchmarks and long-running evaluation of the new lanes and caches, including independent Linux execution. Separate disk scheduling/rate budgets and wider single-read coverage remain possible follow-ups.
 
 ## Operational work
