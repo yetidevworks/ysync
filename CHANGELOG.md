@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.3.1
+## 0.3.2
+
+- Explicitly release offline-operation locks at scope exit, even when a subprocess temporarily inherits a duplicate descriptor. Preserve running-daemon refusal. The 0.3.1 tag failed this release test and was not published.
 
 - Wait for complete status accounting in the adaptive-delta regression before measuring the next transfer. The 0.3.0 tag failed this release test and was not published.
 

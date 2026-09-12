@@ -37,7 +37,16 @@ pub struct Summary {
     pub receive: u64,
     pub send_new: u64,
 }
-pub(crate) fn stopped(home: &Path) -> Result<fs::File> {
+pub(crate) struct Stopped(fs::File);
+impl Drop for Stopped {
+    fn drop(&mut self) {
+        // flock belongs to the open file description. A concurrent subprocess
+        // spawn can inherit it until exec even with CLOEXEC; release ownership
+        // explicitly when this operation ends, before closing our descriptor.
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
+}
+pub(crate) fn stopped(home: &Path) -> Result<Stopped> {
     use std::os::unix::fs::OpenOptionsExt;
     let lock = fs::OpenOptions::new()
         .read(true)
@@ -47,7 +56,7 @@ pub(crate) fn stopped(home: &Path) -> Result<fs::File> {
         .mode(0o600)
         .open(home.join("daemon.lock"))?;
     fs2::FileExt::try_lock_exclusive(&lock).context("stop the ysync daemon first")?;
-    Ok(lock)
+    Ok(Stopped(lock))
 }
 pub(crate) fn root(home: &Path, folder: &str) -> Result<engine::Root> {
     let f = config::load(home)?
@@ -763,6 +772,20 @@ mod tests {
         assert!(apply(a.home.path(), &plan).is_err());
         assert!(apply(b.home.path(), &plan).is_err());
         assert_eq!(fs::read(a.files.path().join("file")).unwrap(), b"source");
+    }
+    #[test]
+    fn completed_operation_unlocks_even_if_a_descriptor_was_inherited() {
+        let h = tempfile::tempdir().unwrap();
+        let guard = stopped(h.path()).unwrap();
+        let inherited = guard.0.try_clone().unwrap();
+        assert!(stopped(h.path()).is_err());
+        drop(guard);
+        let next = stopped(h.path()).unwrap();
+        assert!(stopped(h.path()).is_err());
+        drop(inherited);
+        assert!(stopped(h.path()).is_err());
+        drop(next);
+        assert!(stopped(h.path()).is_ok());
     }
     #[test]
     fn daemon_lock_and_configuration_changes_reject_enrollment() {
