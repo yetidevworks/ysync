@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.6
+
+- Add an on-demand conflict review panel (`c`) with folder scope, search, 50-record pages, current/local versus incoming metadata, bounded verified text previews, and keyboard scrolling.
+- Expose one-record keep-local resolution with explicit confirmation, daemon-lock enforcement, and checks that reject content, metadata, or version changes since review. Support reviewing a manually merged working file while the daemon remains stopped. Keep incoming archives and unrelated records.
+- Run conflict queries and preview reads off the terminal event loop. Preserve normal snapshot-only monitoring overhead. Add real-terminal cancel/confirm tests and regressions for stale reviews, archive safety, pagination, and read-only browsing.
+
 ## 0.2.5
 
 - Replace `ysync monitor` with a responsive Ratatui dashboard: payload sparklines, selectable folders, expanded watcher/device diagnostics, keyboard navigation, and searchable/filterable activity. Keep `monitor --plain`, `status`, and `status --json` available.

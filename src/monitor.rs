@@ -1,4 +1,6 @@
-//! Read-only dashboard: reads the daemon's bounded snapshot, never the file index or sync trees.
+//! Snapshot dashboard with on-demand conflict review.
+#[path = "monitor_conflicts.rs"]
+mod conflict_panel;
 use crate::{
     config,
     daemon::{self, Event, Status},
@@ -125,6 +127,7 @@ fn panel(title: impl Into<Line<'static>>, active: bool) -> Block<'static> {
 
 #[derive(Default)]
 struct Dashboard {
+    conflicts: conflict_panel::Panel,
     status: Option<Status>,
     config: Option<config::Config>,
     error: Option<String>,
@@ -276,6 +279,9 @@ impl Dashboard {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return true;
         }
+        if self.conflicts.active {
+            return self.conflicts.key(key);
+        }
         if self.searching {
             match key.code {
                 KeyCode::Esc | KeyCode::Enter => self.searching = false,
@@ -309,6 +315,7 @@ impl Dashboard {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return true,
             KeyCode::Char('?') => self.help = true,
+            KeyCode::Char('c') => self.conflicts.open(self.selected.clone()),
             KeyCode::Char('d') | KeyCode::Enter => {
                 self.expanded = true;
                 self.detail_scroll = 0;
@@ -351,6 +358,18 @@ impl Dashboard {
         ])
         .split(area);
         self.header(frame, sections[0]);
+        if self.conflicts.active {
+            self.conflicts.draw(
+                frame,
+                Rect::new(
+                    area.x,
+                    area.y + 3,
+                    area.width,
+                    area.height.saturating_sub(3),
+                ),
+            );
+            return;
+        }
         self.traffic(frame, sections[1]);
         let middle = if area.width >= 100 {
             Layout::horizontal([Constraint::Percentage(46), Constraint::Percentage(54)])
@@ -370,7 +389,7 @@ impl Dashboard {
                 clean(&self.query)
             )
         } else {
-            " Tab focus  ↑↓ select  f filter  / search  Space freeze  d details  ? help  q quit"
+            " q quit  ? help  c conflicts  Tab focus  ↑↓ select  / search  f filter  d details"
                 .into()
         };
         frame.render_widget(Paragraph::new(footer).fg(MUTED), sections[4]);
@@ -396,7 +415,8 @@ impl Dashboard {
             frame.render_widget(Clear, popup);
             frame.render_widget(
                 Paragraph::new(vec![
-                    Line::from("A read-only view. Quitting never stops the service.".bold()),
+                    Line::from("Monitoring never stops the service.".bold()),
+                    Line::from("c            Review conflicts; resolutions require confirmation"),
                     Line::from(""),
                     Line::from("Tab          Switch folders / activity"),
                     Line::from("↑ ↓ / j k    Select folder or event; full detail appears below"),
@@ -885,6 +905,7 @@ pub fn run(home: &Path) -> Result<()> {
             refresh = Instant::now();
             dirty = true;
         }
+        dirty |= app.conflicts.tick(home);
         if dirty {
             terminal.draw(|f| app.draw(f))?;
             dirty = false;

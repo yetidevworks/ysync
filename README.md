@@ -26,13 +26,13 @@ Use Rust/Cargo 1.88 or newer and a C compiler. SQLite is bundled; no separate SQ
 
 ```sh
 cargo install --git https://github.com/yetidevworks/ysync.git \
-  --tag v0.2.5 --locked ysync
+  --tag v0.2.6 --locked ysync
 ysync --version
 ```
 
 Cargo installs the command under `~/.cargo/bin`; make sure that directory is on your PATH. With a rustup installation, `source "$HOME/.cargo/env"` activates it in the current shell. Installation builds the binary but does not start a service or change your sync configuration. This crate is not published to crates.io. Cargo's [Git installation options](https://doc.rust-lang.org/cargo/commands/cargo-install.html) support selecting a tag and using the committed dependency lockfile.
 
-For the latest main branch, replace `--tag v0.2.5` with `--branch main`. To update an installed service: stop it, install the desired tag with `--force`, and start it again. Reinstall the service definition if the binary's installation path changes.
+For the latest main branch, replace `--tag v0.2.6` with `--branch main`. To update an installed service: stop it, install the desired tag with `--force`, and start it again. Reinstall the service definition if the binary's installation path changes.
 
 ### Download a binary
 
@@ -50,13 +50,13 @@ Linux archives require glibc 2.35 or newer. Build with Cargo on older systems. M
 For example, on an Apple Silicon Mac:
 
 ```sh
-curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.2.5/ysync-v0.2.5-aarch64-apple-darwin.tar.gz
-curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.2.5/SHA256SUMS
-shasum -a 256 ysync-v0.2.5-aarch64-apple-darwin.tar.gz
+curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.2.6/ysync-v0.2.6-aarch64-apple-darwin.tar.gz
+curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.2.6/SHA256SUMS
+shasum -a 256 ysync-v0.2.6-aarch64-apple-darwin.tar.gz
 # Compare the result with its matching entry in SHA256SUMS.
-tar -xzf ysync-v0.2.5-aarch64-apple-darwin.tar.gz
+tar -xzf ysync-v0.2.6-aarch64-apple-darwin.tar.gz
 mkdir -p ~/.local/bin
-install -m 755 ysync-v0.2.5-aarch64-apple-darwin/ysync ~/.local/bin/ysync
+install -m 755 ysync-v0.2.6-aarch64-apple-darwin/ysync ~/.local/bin/ysync
 ```
 
 Put `~/.local/bin` on your PATH if you use this location. `ysync --help` shows all commands.
@@ -133,10 +133,11 @@ ysync folder pause code
 ysync folder resume code
 ```
 
-The Ratatui dashboard shows payload rates with bounded history graphs, a selectable folder table, watcher diagnostics, device connection/approval state, and a searchable recent activity feed. It reads the daemon snapshot once per second without scanning folders or opening the sync index. It adapts to terminal resizing (minimum 60 columns × 20 rows); use `d` for full folder/device details on smaller terminals.
+The Ratatui dashboard shows payload rates with bounded history graphs, a selectable folder table, watcher diagnostics, device connection/approval state, and a searchable recent activity feed. The overview reads the daemon snapshot once per second without scanning folders or opening the sync index. Conflict review accesses the index only on request. It adapts to terminal resizing (minimum 60 columns × 20 rows); use `d` for full folder/device details on smaller terminals.
 
 | Key | Action |
 | --- | --- |
+| `c` | Open conflict review for the selected folder |
 | `Tab` | Switch focus between folders and activity |
 | `↑` / `↓`, `j` / `k` | Select a folder or activity row |
 | `Page Up` / `Page Down` | Move ten rows |
@@ -147,6 +148,12 @@ The Ratatui dashboard shows payload rates with bounded history graphs, a selecta
 | `Space` | Freeze/resume the display; synchronization continues |
 | `?` | Show help |
 | `q` / `Ctrl-C` | Exit the monitor |
+
+Press `c` to review pending conflicts. Use `f` for the selected folder or all folders, `/` to search, `n`/`p` to page through 50 records at a time, and `Enter` to inspect one record. The review shows current local and preserved incoming metadata, content hashes, version clocks, and text previews. The list's local kind is historical; the detail panel observes the current working version. Use arrows to scroll both previews; narrower terminals stack them vertically. `r` explicitly refreshes the list or selected review.
+
+Press `l` to **keep the reviewed current local version**, then `y` to confirm that one record; any other key cancels. Stop the local daemon first (for Homebrew: `brew services stop ysync`) and leave the monitor open. Resolution acquires the daemon lock, checks the file again, rejects stale reviews, retains the incoming archive, and leaves other conflict records pending. Keeping a local deletion propagates that deletion. Restart the service afterward (`brew services start ysync`) to propagate the decision.
+
+This panel supports the existing keep-local resolver. To choose incoming content or manually merge, compare the preserved archive externally, edit the working file deliberately, refresh the review, and keep that reviewed local result. There is no automatic incoming replacement or bulk resolution. Review alone never resolves records. Text previews read at most 64 KiB and verify hashes; binary, oversized, missing, or changed archives display an explanation. A changed working file can be hashed on request up to 16 MiB; larger changed files must first be indexed by the scanner. Database queries and selected-path reads run on a single background worker, not every dashboard refresh.
 
 The activity window is bounded to 64 daemon events, including at most 16 index records so reconciliation does not evict every useful message. It is not a persistent log. **Index** means an incoming record was reconciled; it does not mean a working file was overwritten. Receive payload includes preserved incoming conflict versions. JSON field `received_entries` retains its existing meaning as reconciled records. Graphs show up to 60 observed snapshots with independent scales and reset when the daemon restarts. The header identifies monitor and daemon versions separately; older daemons report an unknown version.
 

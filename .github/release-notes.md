@@ -1,7 +1,7 @@
-A new Ratatui dashboard replaces the plain live monitor. It includes payload throughput graphs, selectable folders, expanded watcher/device diagnostics, and a searchable, filterable activity feed. Press `?` for controls, `d` for full diagnostics, and `q` to leave while synchronization continues. `ysync monitor --plain`, `ysync status`, and JSON status remain available.
+Press `c` in the monitor to open conflict review. Browse by folder, search, page through records, and inspect current local versus preserved incoming versions with metadata and bounded text previews.
 
-Incoming index reconciliation is now labeled clearly and limited within the recent activity window, keeping other events visible. The monitor distinguishes its own version from the daemon version, handles stale/missing snapshots, and restores the terminal on exit. It reads snapshots once per second without scanning folders or opening the sync index.
+Press `l` then `y` to explicitly keep one reviewed local version. The daemon must be stopped; changed files or version clocks reject stale confirmation. Incoming archives and unrelated records stay preserved. Manually merge or copy chosen incoming content outside the TUI, refresh the review, then keep that local result. This release does not choose resolutions automatically or add bulk incoming replacement.
 
-Upgrade with `brew update && brew upgrade ysync`, or `cargo install --git https://github.com/yetidevworks/ysync.git --tag v0.2.5 --locked ysync`. Restart the service for daemon version reporting and improved activity retention; launch a new `ysync monitor` for the dashboard. Wire protocol remains 4 and conflict decisions are unchanged.
+Conflict queries and preview work are on demand and off the terminal event loop. Normal monitoring keeps its snapshot-only behavior. Mac/Linux terminal tests exercise review, cancellation, one-record confirmation, resize, and clean exit; resolver regressions cover stale edits, manual merges, archive safety, and bounded pages.
 
-Experimental release; live reconciliation remains under evaluation.
+Upgrade with `brew update && brew upgrade ysync` or install Cargo tag `v0.2.6`. Restart the monitor to use the panel. Wire protocol remains4; existing conflict decisions are unchanged. Experimental release.

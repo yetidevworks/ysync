@@ -76,7 +76,58 @@ def check(binary):
                 os.close(slave)
 
 
+def conflict_flow(binary):
+    import sqlite3
+    with tempfile.TemporaryDirectory(prefix="ysync-review-") as base:
+        home = Path(base, "state")
+        root = Path(base, "files")
+        root.mkdir()
+        def cli(*args):
+            return subprocess.run([binary, "--home", str(home), *args], check=True, capture_output=True).stdout.decode().strip()
+        cli("init", "--name", "review-test")
+        cli("folder", "add", "code", str(root))
+        device = cli("id")
+        local = dict(path="removed.txt", kind="Deleted", size=0, hash="", target=None, mode=0, clock={device: 1}, seq=1)
+        c = sqlite3.connect(home / "index.sqlite")
+        c.execute("INSERT INTO entries VALUES(?,?,?,?,?,?,?)", ("code", "removed.txt", "removed.txt", 1, json.dumps(local), "", 0))
+        c.execute("INSERT INTO counters VALUES('code',1)")
+        for identifier, peer in (("a"*64,"b"*64),("c"*64,"d"*64)):
+            incoming = dict(local, clock={peer: 1})
+            record = dict(id=identifier, folder="code", local=local, incoming=incoming, payload=None)
+            c.execute("INSERT INTO conflicts VALUES(?,?,?,?)", ("code", identifier, "removed.txt", json.dumps(record)))
+        c.commit()
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH",42,140,0,0))
+        process = subprocess.Popen([binary,"--home",str(home),"monitor"],stdin=slave,stdout=slave,stderr=slave,start_new_session=True)
+        output=bytearray()
+        def drain(seconds=.4):
+            until=time.monotonic()+seconds
+            while time.monotonic()<until:
+                if select.select([master],[],[],max(0,until-time.monotonic()))[0]:
+                    output.extend(os.read(master,65536))
+        def key(value):
+            os.write(master,value);drain()
+        try:
+            drain();key(b"c")
+            assert b"CONFLICT REVIEW" in output and b"removed.txt" in output
+            key(b"\r")
+            assert all(word in output for word in (b"CURRENT",b"LOCAL",b"PRESERVED",b"INCOMING"))
+            key(b"l");assert b"confirms" in output
+            key(b"n");assert c.execute("SELECT count(*) FROM conflicts").fetchone()[0]==2
+            key(b"l");key(b"y");drain()
+            assert c.execute("SELECT id FROM conflicts").fetchall()==[("c"*64,)], "confirmation must resolve only the selected record"
+            assert b"Kept" in output
+            assert not (root/"removed.txt").exists(), "resolution must preserve local absence"
+            key(b"q");assert process.wait(timeout=3)==0
+            print("PASS: conflict list, review, cancel, explicit one-record confirmation, retained local absence")
+        finally:
+            if process.poll() is None:process.kill();process.wait()
+            os.close(master);os.close(slave);c.close()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", required=True)
-    check(str(Path(parser.parse_args().binary).resolve()))
+    binary = str(Path(parser.parse_args().binary).resolve())
+    check(binary)
+    conflict_flow(binary)
