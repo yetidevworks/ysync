@@ -306,6 +306,8 @@ ysync service uninstall
 
 Only one installed service is supported per OS user. `--home` supports separate foreground instances for tests. The service command embeds the binary's absolute path; reinstall the service if you move the binary.
 
+If the daemon was started with `brew services start ysync` and no native service is installed, `ysync service status`, `stop` and `start` manage Homebrew's definition instead (`sh.brew.ysync`, or the older `homebrew.mxcl.ysync` / `homebrew.ysync`). `stop` unloads it until the next login or `start`; `brew services stop ysync` also removes it from login. `install` refuses while Homebrew's definition exists, and `uninstall` leaves it for Homebrew to remove.
+
 ## Folder direction policies
 
 Each folder has an explicit local mode. Existing configurations default to `send-receive`.

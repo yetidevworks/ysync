@@ -138,6 +138,9 @@ pub fn stamp(m: &Metadata) -> String {
         m.ctime_nsec()
     )
 }
+fn unchanged(old: &Entry, m: &Metadata) -> bool {
+    old.kind != Kind::Deleted && old.stamp == stamp(m) && old.mode == m.mode() & 0o777
+}
 #[cfg(test)]
 fn hash_reader(reader: &mut impl Read, root: &Root) -> Result<(String, u64)> {
     let (hash, bytes, _) = hash_collect(reader, root, None)?;
@@ -190,11 +193,11 @@ pub fn observe(root: &Root, path: &str, old: Option<&Entry>, force: bool) -> Res
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
     };
-    let st = stamp(&meta);
-    let mode = meta.mode() & 0o777;
-    if !force && old.is_some_and(|e| e.kind != Kind::Deleted && e.stamp == st && e.mode == mode) {
+    if !force && old.is_some_and(|e| unchanged(e, &meta)) {
         return Ok(old.cloned());
     }
+    let st = stamp(&meta);
+    let mode = meta.mode() & 0o777;
     let (kind, size, hash, target) = if meta.is_symlink() {
         let t = parent
             .read_link_contents(name)?
@@ -292,24 +295,31 @@ fn record_observation(
     }
     Ok(())
 }
+/// Each path may carry the metadata the walk read through the checked handle of the
+/// directory listing it; a match with the index then needs no further filesystem access.
 fn scan_batch(
     c: &mut Connection,
     root: &Root,
-    paths: &[String],
+    paths: &[(String, Option<Metadata>)],
     device: &str,
     seen: i64,
     force: bool,
 ) -> Result<Vec<String>> {
     let inputs = paths
         .iter()
-        .filter(|p| !root.excluded(p))
-        .map(|p| Ok((p.clone(), store::get(c, &root.folder.id, p)?)))
+        .filter(|(p, _)| !root.excluded(p))
+        .map(|(p, listed)| Ok((p.clone(), store::get(c, &root.folder.id, p)?, listed)))
         .collect::<Result<Vec<_>>>()?;
     // Hash in parallel outside the SQLite write transaction. The caller's folder gate
     // protects the indexed baseline; other folders can commit while these reads run.
     let observations = inputs
         .par_iter()
-        .map(|(p, old)| observe(root, p, old.as_ref(), force))
+        .map(|(p, old, listed)| match (old, listed) {
+            (Some(e), Some(m)) if !force && unchanged(e, m) => {
+                root.scan_checkpoint().map(|_| Some(e.clone()))
+            }
+            _ => observe(root, p, old.as_ref(), force),
+        })
         .collect::<Vec<_>>();
     if observations.iter().any(|r| {
         r.as_ref()
@@ -321,7 +331,7 @@ fn scan_batch(
     root.check()?;
     let mut errors = Vec::new();
     let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    for ((path, old), observed) in inputs.into_iter().zip(observations) {
+    for ((path, old, _), observed) in inputs.into_iter().zip(observations) {
         match observed {
             Ok(None) if old.as_ref().is_some_and(|e| e.kind == Kind::Directory) => {
                 // A recursive removal can race enumeration. Journal its tombstone in
@@ -333,6 +343,27 @@ fn scan_batch(
     }
     tx.commit()?;
     Ok(errors)
+}
+/// Indexes the queued paths under the folder gate and returns how many were checked.
+fn flush_batch(
+    c: &mut Connection,
+    root: &Root,
+    batch: &mut Vec<(String, Option<Metadata>)>,
+    device: &str,
+    epoch: i64,
+    errors: &mut Vec<String>,
+) -> Result<u64> {
+    let _guard = root.gate.lock().unwrap();
+    root.check()?;
+    let batch_errors = scan_batch(c, root, batch, device, epoch, false)?;
+    errors.extend(
+        batch_errors
+            .into_iter()
+            .take(32usize.saturating_sub(errors.len())),
+    );
+    let checked = batch.len() as u64;
+    batch.clear();
+    Ok(checked)
 }
 pub fn scan(
     root: &Root,
@@ -380,11 +411,17 @@ fn scan_impl(
     let epoch = SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros() as i64;
     let full = subpaths.is_none();
     let regions = subpaths.clone().unwrap_or_default();
-    let mut stack = subpaths.unwrap_or_else(|| vec![String::new()]);
+    // Requested paths are queued when popped. Whatever a directory lists is queued while
+    // that directory is open, so only its subdirectories come back here, marked as listed.
+    let mut stack: Vec<(String, bool)> = subpaths
+        .unwrap_or_else(|| vec![String::new()])
+        .into_iter()
+        .map(|p| (p, false))
+        .collect();
     let mut batch = Vec::new();
     let mut count = 0;
     let mut errors = Vec::new();
-    while let Some(path) = stack.pop() {
+    while let Some((path, listed)) = stack.pop() {
         root.scan_checkpoint()?;
         if root.excluded(&path) {
             continue;
@@ -403,9 +440,13 @@ fn scan_impl(
                 }
             }
         };
+        // A requested path goes ahead of its contents: parents are always indexed first.
+        if !listed && !path.is_empty() {
+            batch.push((path.clone(), None));
+        }
         if recursive && m.as_ref().is_some_and(|m| m.is_dir() && !m.is_symlink()) {
             on_directory(&path, m.as_ref().unwrap());
-            let children = (|| -> Result<Vec<String>> {
+            let children = (|| -> Result<(Dir, Vec<String>)> {
                 let dir = if path.is_empty() {
                     root.dir.try_clone()?
                 } else {
@@ -441,10 +482,27 @@ fn scan_impl(
                         children.push(child);
                     }
                 }
-                Ok(children)
+                Ok((dir, children))
             })();
             match children {
-                Ok(paths) => stack.extend(paths),
+                Ok((dir, children)) => {
+                    for child in children {
+                        // One stat through the open directory, instead of reopening every
+                        // parent from the root to check each entry.
+                        let meta = dir
+                            .symlink_metadata(Path::new(&child).file_name().unwrap())
+                            .ok();
+                        if meta.as_ref().is_some_and(|m| m.is_dir() && !m.is_symlink()) {
+                            stack.push((child.clone(), true));
+                        }
+                        batch.push((child, meta));
+                        if batch.len() >= 128 {
+                            count +=
+                                flush_batch(&mut c, root, &mut batch, device, epoch, &mut errors)?;
+                            progress(count);
+                        }
+                    }
+                }
                 Err(e) if e.is::<crate::scanning::ScanCancelled>() => return Err(e),
                 Err(e) => {
                     if errors.len() < 32 {
@@ -453,20 +511,8 @@ fn scan_impl(
                 }
             }
         }
-        if !path.is_empty() {
-            batch.push(path);
-        }
         if batch.len() >= 128 || stack.is_empty() {
-            let _guard = root.gate.lock().unwrap();
-            root.check()?;
-            let batch_errors = scan_batch(&mut c, root, &batch, device, epoch, false)?;
-            errors.extend(
-                batch_errors
-                    .into_iter()
-                    .take(32usize.saturating_sub(errors.len())),
-            );
-            count += batch.len() as u64;
-            batch.clear();
+            count += flush_batch(&mut c, root, &mut batch, device, epoch, &mut errors)?;
             progress(count);
         }
     }
@@ -1184,7 +1230,7 @@ mod tests {
             let merged = store::get(&c, "test", path).unwrap().unwrap();
             assert_eq!(merged.clock, model::merge(&local.clock, &remote.clock));
             let mut c = store::open(state.path()).unwrap();
-            scan_batch(&mut c, &root, &[path.into()], &id, 0, false).unwrap();
+            scan_batch(&mut c, &root, &[(path.into(), None)], &id, 0, false).unwrap();
             assert_eq!(
                 store::get(&c, "test", path).unwrap().unwrap().seq,
                 merged.seq
@@ -1653,7 +1699,7 @@ mod tests {
         scan(&root, state.path(), &id, None, |_| {}).unwrap();
         std::fs::remove_dir_all(files.path().join("dir")).unwrap();
         let mut c = store::open(state.path()).unwrap();
-        scan_batch(&mut c, &root, &["dir".into()], &id, 2, false).unwrap();
+        scan_batch(&mut c, &root, &[("dir".into(), None)], &id, 2, false).unwrap();
         assert_eq!(
             store::get(&c, "test", "dir").unwrap().unwrap().kind,
             Kind::Directory
@@ -1712,5 +1758,58 @@ mod tests {
         scan_entries(&root, state.path(), &id, vec!["dir/file".into()], |_| {}).unwrap();
         scan(&root, state.path(), &id, Some(vec!["dir".into()]), |_| {}).unwrap();
         assert_eq!(root.hashed_files.load(Ordering::Relaxed), hashes);
+    }
+    #[test]
+    fn listed_entries_are_checked_once_and_parents_stay_first_across_batches() {
+        let (state, files, root, id) = fixture();
+        std::fs::create_dir_all(files.path().join("wide/deep/er")).unwrap();
+        std::fs::write(files.path().join("wide/deep/er/leaf"), b"leaf").unwrap();
+        for i in 0..300 {
+            std::fs::write(files.path().join(format!("wide/f{i}")), b"same").unwrap();
+        }
+        // wide, its 300 files, deep, er and leaf.
+        assert_eq!(scan(&root, state.path(), &id, None, |_| {}).unwrap(), 304);
+        let c = store::open(state.path()).unwrap();
+        let seq = |p: &str| store::get(&c, "test", p).unwrap().unwrap().seq;
+        let order = ["wide", "wide/deep", "wide/deep/er", "wide/deep/er/leaf"].map(seq);
+        assert!(order.is_sorted());
+        assert!((0..300).all(|i| seq("wide") < seq(&format!("wide/f{i}"))));
+        let hashes = root.hashed_files.load(Ordering::Relaxed);
+        assert_eq!(hashes, 301);
+        assert_eq!(scan(&root, state.path(), &id, None, |_| {}).unwrap(), 304);
+        assert_eq!(root.hashed_files.load(Ordering::Relaxed), hashes);
+        assert_eq!(
+            order,
+            ["wide", "wide/deep", "wide/deep/er", "wide/deep/er/leaf"].map(seq)
+        );
+    }
+    #[test]
+    fn rescan_finds_changes_to_listed_entries_and_never_descends_links() {
+        let (state, files, root, id) = fixture();
+        let dir = files.path().join("a/b");
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["keep", "edit", "gone"] {
+            std::fs::write(dir.join(name), name).unwrap();
+        }
+        std::os::unix::fs::symlink("b", files.path().join("a/link")).unwrap();
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        let c = store::open(state.path()).unwrap();
+        let get = |p: &str| store::get(&c, "test", p).unwrap();
+        let kept = get("a/b/keep").unwrap().seq;
+        assert_eq!(get("a/link").unwrap().kind, Kind::Symlink);
+        assert!(get("a/link/keep").is_none());
+        std::fs::write(dir.join("edit"), b"edited").unwrap();
+        std::fs::remove_file(dir.join("gone")).unwrap();
+        std::fs::write(dir.join("new"), b"new").unwrap();
+        let hashes = root.hashed_files.load(Ordering::Relaxed);
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        assert_eq!(root.hashed_files.load(Ordering::Relaxed), hashes + 2);
+        assert_eq!(get("a/b/keep").unwrap().seq, kept);
+        assert_eq!(
+            get("a/b/edit").unwrap().hash,
+            blake3::hash(b"edited").to_hex().as_str()
+        );
+        assert_eq!(get("a/b/gone").unwrap().kind, Kind::Deleted);
+        assert_eq!(get("a/b/new").unwrap().kind, Kind::File);
     }
 }

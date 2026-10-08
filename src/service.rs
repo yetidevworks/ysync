@@ -51,6 +51,24 @@ fn path() -> Result<PathBuf> {
         _ => bail!("unsupported platform"),
     }
 }
+/// The definition `brew services start ysync` writes, under its current or legacy name.
+fn homebrew(platform: &str, home: &Path) -> Option<PathBuf> {
+    let (dir, names) = match platform {
+        "macos" => (
+            "Library/LaunchAgents",
+            ["sh.brew.ysync.plist", "homebrew.mxcl.ysync.plist"],
+        ),
+        "linux" => (
+            ".config/systemd/user",
+            ["sh.brew.ysync.service", "homebrew.ysync.service"],
+        ),
+        _ => return None,
+    };
+    names
+        .iter()
+        .map(|name| home.join(dir).join(name))
+        .find(|p| p.exists())
+}
 fn uid() -> Result<String> {
     let o = Command::new("id").arg("-u").output()?;
     if !o.status.success() {
@@ -65,14 +83,23 @@ fn run(cmd: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 pub fn action(home: &Path, action: &str) -> Result<()> {
-    let p = path()?;
+    let mut p = path()?;
     let platform = std::env::consts::OS;
+    // ysync's own definition wins; without one, manage the daemon Homebrew installed.
+    let brewed = homebrew(platform, &dirs::home_dir().context("cannot locate home")?)
+        .filter(|_| !p.exists());
     if action == "install" {
         config::load(home)?;
         if p.exists() {
             bail!(
                 "service already exists at {}; uninstall it first",
                 p.display()
+            );
+        }
+        if let Some(b) = &brewed {
+            bail!(
+                "Homebrew already runs ysync from {}; run `brew services stop ysync` first",
+                b.display()
             );
         }
         std::fs::create_dir_all(p.parent().unwrap())?;
@@ -94,7 +121,18 @@ pub fn action(home: &Path, action: &str) -> Result<()> {
         println!("Installed and started {}", p.display());
         return Ok(());
     }
+    if let Some(b) = brewed {
+        if action == "uninstall" {
+            bail!(
+                "{} belongs to Homebrew; remove it with `brew services stop ysync`",
+                b.display()
+            );
+        }
+        println!("Managing the Homebrew service at {}", b.display());
+        p = b;
+    }
     if platform == "linux" {
+        let unit = p.file_name().unwrap().to_str().unwrap();
         match action {
             "uninstall" => {
                 run(
@@ -104,12 +142,12 @@ pub fn action(home: &Path, action: &str) -> Result<()> {
                 std::fs::remove_file(&p)?;
                 run("systemctl", &["--user", "daemon-reload"])?;
             }
-            "start" | "stop" | "status" => run("systemctl", &["--user", action, "ysync.service"])?,
+            "start" | "stop" | "status" => run("systemctl", &["--user", action, unit])?,
             _ => bail!("unknown service action"),
         }
     } else {
         let domain = format!("gui/{}", uid()?);
-        let label = format!("{domain}/dev.yetidevworks.ysync");
+        let label = format!("{domain}/{}", p.file_stem().unwrap().to_str().unwrap());
         match action {
             "start" => run("launchctl", &["bootstrap", &domain, p.to_str().unwrap()])?,
             "stop" => run("launchctl", &["bootout", &label])?,
@@ -134,5 +172,28 @@ mod tests {
         let s = render("linux", exe, h).unwrap();
         assert!(s.contains("%%\\\"$$b"));
         assert!(s.contains("UMask=0077"));
+    }
+    #[test]
+    fn finds_homebrew_definitions_current_name_first() {
+        let home = tempfile::tempdir().unwrap();
+        let found = |platform| homebrew(platform, home.path());
+        assert!(found("macos").is_none() && found("linux").is_none());
+        let agents = home.path().join("Library/LaunchAgents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(agents.join("homebrew.mxcl.ysync.plist"), "").unwrap();
+        assert_eq!(
+            found("macos").unwrap(),
+            agents.join("homebrew.mxcl.ysync.plist")
+        );
+        std::fs::write(agents.join("sh.brew.ysync.plist"), "").unwrap();
+        assert_eq!(found("macos").unwrap(), agents.join("sh.brew.ysync.plist"));
+        let units = home.path().join(".config/systemd/user");
+        std::fs::create_dir_all(&units).unwrap();
+        std::fs::write(units.join("homebrew.ysync.service"), "").unwrap();
+        assert_eq!(
+            found("linux").unwrap(),
+            units.join("homebrew.ysync.service")
+        );
+        assert!(found("windows").is_none());
     }
 }
