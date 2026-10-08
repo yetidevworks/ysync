@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1
+
+- Check every entry a directory lists with one stat through that directory's open, verified handle. Reopen parent directories from the folder root only for entries that are new, changed or could not be read. An unchanged rescan of a 120,000-file fixture fell from 29.6 s to 2.2 s of CPU time on a Mac (single trial); first indexing improves less because hashing dominates. Indexed content, deletion inference and symlink-parent checks are unchanged.
+- Let `ysync service status`, `stop` and `start` manage a daemon started with `brew services start ysync` when no native service is installed, under Homebrew's current (`sh.brew.ysync`) or older names. `install` refuses while Homebrew's definition exists, and `uninstall` leaves it for `brew services stop ysync`. Previously `ysync service stop` reported a missing service while the Homebrew daemon kept running.
+- Keep wire protocol 6, the index format and configuration unchanged. 0.4.0 and 0.4.1 peers synchronize with each other.
+- Add `--groups` to `scripts/benchmark_scan_paths.py` for larger trees and record the measurements and their limits.
+
 ## 0.4.0
 
 - Add explicit per-folder `send-receive`, `send-only` and conservative `receive-only` policies. Existing folders remain bidirectional. Receive-only protects local edits and prevents upstream entry transfer; it does not silently force a mirror or resolve pre-existing conflicts.

@@ -11,13 +11,15 @@ p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--binary', required=True, type=Path)
 p.add_argument('--base', required=True, type=Path)
 p.add_argument('--label', required=True)
+p.add_argument('--groups', type=int, default=60, help='branches of 100 files each; 60 is the recorded 6,000-file fixture')
 a = p.parse_args()
 base = a.base.resolve()
 base.mkdir(parents=True, exist_ok=True)
 root = base/'files'
+files = a.groups*100
 if not root.exists():
     root.mkdir()
-    for group in range(60):
+    for group in range(a.groups):
         parent = root/f'g{group:03}'
         for depth in range(8):
             parent /= f'd{depth}'
@@ -32,7 +34,7 @@ def cli(*args):
     subprocess.run([binary, '--home', str(state), *args], check=True, stdout=subprocess.DEVNULL)
 cli('init', '--listen', '127.0.0.1:0', '--scan-workers', '2', '--rescan-secs', '3600')
 cli('folder', 'add', 'bench', str(root))
-result = {'label': a.label, 'files': 6000, 'file_bytes': 4096, 'directory_depth': 9,
+result = {'label': a.label, 'files': files, 'file_bytes': 4096, 'directory_depth': 9,
           'scope': 'Synthetic nested tree, warm filesystem cache, two hash workers; fresh index then daemon restart. Single trial, startup/status polling included.'}
 for stage in ('initial_index', 'warm_reconciliation'):
     (state/'status.json').unlink(missing_ok=True)
@@ -47,7 +49,7 @@ for stage in ('initial_index', 'warm_reconciliation'):
                 status = json.loads((state/'status.json').read_text())['folders']['bench']
                 if status['phase'] in ('error', 'incomplete'):
                     raise RuntimeError(status['error'])
-                if status['phase']=='watching' and status['files']==6000:
+                if status['phase']=='watching' and status['files']==files:
                     break
             except (FileNotFoundError, KeyError, json.JSONDecodeError):
                 pass

@@ -31,6 +31,12 @@
 - [x] Correct README/validation drift about released lanes, caches, retention and historical tests.
 - [ ] Receiver local-difference review/revert workflow; forced mirroring remains a separate explicit policy decision.
 
+## Completed in 0.4.1
+
+- [x] Second scan-cost reduction: entries are checked through the open handle of the directory that lists them, and the full parent check is kept for new or changed entries. Mac fixtures are measured in VALIDATION.md; Linux and the live roots are not measured yet.
+- [x] `ysync service status`, `stop` and `start` manage a Homebrew-started daemon when no native service is installed. Linux verification and Homebrew lifecycle automation remain.
+- [ ] A directory replaced by a file or symlink still fails reconciliation of its former children: the folder stays in `error` and that pass records no deletions. Reproduced on 0.4.0 and 0.4.1.
+
 ## Next performance work
 
 Temperature-aware scanner pause/resume is implemented and covered by controlled tests. A scanner CPU/duty budget independent of worker count and a controlled large-root cooling evaluation remain. The first path-opening optimization is measured in VALIDATION.md; larger controlled follow-up remains. Track initial indexing separately from idle watching and scoped edits. Two hash workers and a later 50% CPU quota did not prevent every Linux trial from reaching its 85°C stop threshold. The server deliberately uses a shallow fan curve: keep temperature control optional, and assess efficiency through CPU seconds, disk reads, repeated work, and idle activity.

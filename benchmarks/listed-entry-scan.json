@@ -1,0 +1,79 @@
+{
+  "dataset": "Branches of 100 files of 4096 bytes, each nine directories deep: 60 branches (6000 files, 6540 indexed entries) and 1200 branches (120000 files, 130800 indexed entries, --groups 1200)",
+  "scope": "Single trial per fixture and build on macOS, October 7 2026. Warm filesystem cache, fresh index followed by a daemon restart, two hash workers, no peers. Wall times include startup and the ~1s status refresh, which dominates the small fixture. Every file is ten path components deep, which favors this change. Linux and the live roots were not measured.",
+  "runner": "scripts/benchmark_scan_paths.py",
+  "macos": {
+    "small": {
+      "before": {
+        "files": 6000,
+        "initial_index": {
+          "wall_seconds": 2.061,
+          "cpu_seconds": 2.61,
+          "checked_entries": 6540,
+          "hashed_files": 6000
+        },
+        "warm_reconciliation": {
+          "wall_seconds": 2.054,
+          "cpu_seconds": 1.64,
+          "checked_entries": 6540,
+          "hashed_files": 0
+        }
+      },
+      "after": {
+        "files": 6000,
+        "initial_index": {
+          "wall_seconds": 2.04,
+          "cpu_seconds": 2.12,
+          "checked_entries": 6540,
+          "hashed_files": 6000
+        },
+        "warm_reconciliation": {
+          "wall_seconds": 1.038,
+          "cpu_seconds": 0.12,
+          "checked_entries": 6540,
+          "hashed_files": 0
+        }
+      }
+    },
+    "large": {
+      "before": {
+        "files": 120000,
+        "initial_index": {
+          "wall_seconds": 34.474,
+          "cpu_seconds": 48.49,
+          "checked_entries": 130800,
+          "hashed_files": 120000
+        },
+        "warm_reconciliation": {
+          "wall_seconds": 21.347,
+          "cpu_seconds": 29.6,
+          "checked_entries": 130800,
+          "hashed_files": 0
+        }
+      },
+      "after": {
+        "files": 120000,
+        "initial_index": {
+          "wall_seconds": 23.285,
+          "cpu_seconds": 36.16,
+          "checked_entries": 130800,
+          "hashed_files": 120000
+        },
+        "warm_reconciliation": {
+          "wall_seconds": 3.081,
+          "cpu_seconds": 2.23,
+          "checked_entries": 130800,
+          "hashed_files": 0
+        }
+      }
+    }
+  },
+  "measured_source": {
+    "before": "480bab8 (0.4.0 code)",
+    "after": "7af02c6 (0.4.1 candidate, before the version change)"
+  },
+  "measured_binary_sha256": {
+    "mac_before": "7de568a7397f16d8966277c53968d488ba96ef27a22a5a70a3e1bb2ef23413e4",
+    "mac_after": "1926b9fe810723a5dcc45df659f2197b575ec899c28f7598b0f58dc81a29a39f"
+  }
+}

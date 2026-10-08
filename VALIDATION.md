@@ -315,3 +315,24 @@ Both services were stopped before backing up configuration and SQLite indexes; p
 After restarting, all three folders on both machines returned to native watching with fresh connected status and no active conflicts. Live probes verified Mac→Linux changes for every folder, locally indexed receiver-only test files staying off the Mac, subsequent source edits, a checksummed 4 MiB payload and its 4 KiB edit, rename propagation and deletion. Cleanup checked exact test contents before removing them; all temporary test directories were removed. Final Mac outbound queues were empty, while Linux correctly reported sending disabled rather than a delivered queue.
 
 The sampled Linux temperature during startup observation peaked at 66.25°C; this is not a continuous maximum or a controlled thermal comparison. The tests are short operational checks, not proof of long-term reliability or a performance ranking. Raw deployment/probe results: [upgrade-0.4.0-live.json](benchmarks/upgrade-0.4.0-live.json).
+
+## October 7: listed-entry scanning and Homebrew service commands (0.4.1)
+
+A live 0.4.0 daemon on the Mac (three send-only roots, about 810,000 checked entries) ran at roughly 115% CPU for about two minutes after a restart and used 2 min 45 s of CPU time while hashing 114 files (23.6 MB). A three-second `sample` put its scan workers almost entirely in `openat` beneath `Root::parent_dir`, called from `observe`: every checked entry reopened each of its parent directories from the folder root, and the walk separately resolved each path from the root before queueing it.
+
+The walk now stats each entry through the open, identity-checked handle of the directory that lists it and queues the entry with that metadata. A batch skips `observe` when the stamp and mode match the index. Entries that are new, changed or could not be read still go through `observe` and its parent checks, directories are still opened through `parent_dir` with the device and inode comparison, and requested paths and the reconciliation pass are unchanged.
+
+| Mac fixture and operation | Before wall | After wall | Before CPU time | After CPU time |
+| --- | ---: | ---: | ---: | ---: |
+| 6,000 files, initial indexing | 2.061 s | 2.040 s | 2.61 s | 2.12 s |
+| 6,000 files, warm reconciliation | 2.054 s | 1.038 s | 1.64 s | 0.12 s |
+| 120,000 files, initial indexing | 34.474 s | 23.285 s | 48.49 s | 36.16 s |
+| 120,000 files, warm reconciliation | 21.347 s | 3.081 s | 29.60 s | 2.23 s |
+
+Both fixtures use branches of 100 files of 4 KiB nine directories deep, two hash workers and warm filesystem caches; the larger one is `--groups 1200` (130,800 entries). These are single trials. Wall times include daemon startup and the roughly one-second status refresh, which dominates the small fixture. Every file sits ten path components deep, which favors this change: an ad hoc 100,800-file tree with files at four to eleven components used about 6.5 times less CPU for warm reconciliation, and that raw data was not retained. All warm reconciliations hashed zero files. Linux was not measured, and the live roots were not rescanned with the new build before release.
+
+A differential run gave the old and new builds separate copies of one tree and applied identical edits, deletions, additions, renames, file and directory type swaps, mode changes and links, both while the daemon was stopped and while it ran. Indexed kind, size, hash, link target and mode matched for every path at every step, as did folder phase and the hashed and checked counters. The script was ad hoc and is not in the repository. It also reproduced an existing fault in both builds: after a directory becomes a file or a symlink, reconciliation of its former children fails with `path parent is not a real directory`, the folder stays in `error` across restarts, and that pass records no deletions. 0.4.1 does not change this.
+
+`ysync service status`, `start` and `stop` were exercised against a disposable launchd job named `homebrew.mxcl.ysync` under a temporary `HOME`, along with the `install` and `uninstall` refusals and the precedence of a native definition. The installed service was not used. The Linux unit names come from Homebrew's `service.rb` and are covered by a unit test only.
+
+Runner: `scripts/benchmark_scan_paths.py`. Raw data: [listed-entry-scan.json](benchmarks/listed-entry-scan.json).

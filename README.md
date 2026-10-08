@@ -6,6 +6,8 @@ Direct, encrypted file synchronization for macOS and Linux. A Rust daemon, a liv
 
 Version **0.4.0** adds explicit folder directions and uses **wire protocol 6**. Upgrade both peers together; 0.3.2–0.3.3 peers use protocol 5 and cannot synchronize with 0.4.0. Existing configurations remain bidirectional until you explicitly change a folder mode.
 
+Version **0.4.1** keeps wire protocol 6, so it synchronizes with 0.4.0 peers and each machine can upgrade on its own. It makes rescans of unchanged folders much cheaper and lets `ysync service` manage a daemon started by Homebrew.
+
 ## Install
 
 ### Homebrew
@@ -28,13 +30,13 @@ Use Rust/Cargo 1.88 or newer and a C compiler. SQLite is bundled; no separate SQ
 
 ```sh
 cargo install --git https://github.com/yetidevworks/ysync.git \
-  --tag v0.4.0 --locked ysync
+  --tag v0.4.1 --locked ysync
 ysync --version
 ```
 
 Cargo installs the command under `~/.cargo/bin`; make sure that directory is on your PATH. With a rustup installation, `source "$HOME/.cargo/env"` activates it in the current shell. Installation builds the binary but does not start a service or change your sync configuration. This crate is not published to crates.io. Cargo's [Git installation options](https://doc.rust-lang.org/cargo/commands/cargo-install.html) support selecting a tag and using the committed dependency lockfile.
 
-For the latest main branch, replace `--tag v0.4.0` with `--branch main`. To update an installed service: stop it, install the desired tag with `--force`, and start it again. Reinstall the service definition if the binary's installation path changes.
+For the latest main branch, replace `--tag v0.4.1` with `--branch main`. To update an installed service: stop it, install the desired tag with `--force`, and start it again. Reinstall the service definition if the binary's installation path changes.
 
 ### Download a binary
 
@@ -52,13 +54,13 @@ Linux archives require glibc 2.35 or newer. Build with Cargo on older systems. M
 For example, on an Apple Silicon Mac:
 
 ```sh
-curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.4.0/ysync-v0.4.0-aarch64-apple-darwin.tar.gz
-curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.4.0/SHA256SUMS
-shasum -a 256 ysync-v0.4.0-aarch64-apple-darwin.tar.gz
+curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.4.1/ysync-v0.4.1-aarch64-apple-darwin.tar.gz
+curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.4.1/SHA256SUMS
+shasum -a 256 ysync-v0.4.1-aarch64-apple-darwin.tar.gz
 # Compare the result with its matching entry in SHA256SUMS.
-tar -xzf ysync-v0.4.0-aarch64-apple-darwin.tar.gz
+tar -xzf ysync-v0.4.1-aarch64-apple-darwin.tar.gz
 mkdir -p ~/.local/bin
-install -m 755 ysync-v0.4.0-aarch64-apple-darwin/ysync ~/.local/bin/ysync
+install -m 755 ysync-v0.4.1-aarch64-apple-darwin/ysync ~/.local/bin/ysync
 ```
 
 Put `~/.local/bin` on your PATH if you use this location. `ysync --help` shows all commands.
@@ -444,7 +446,7 @@ The benchmark creates two isolated local instances and reports bootstrap duratio
 
 Run `cargo bench --bench delta --locked` for the synthetic content-defined versus fixed-block comparison, or add `--delta --files 1 --size 33554432` to the SSH benchmark for a 32 MiB test file with three edits.
 
-See [ROADMAP.md](ROADMAP.md) for upcoming performance and operational work. Releases 0.3.2–0.3.3 use **wire protocol 5**. Version 0.4.0 uses **wire protocol 6** and refuses protocol 5 before any folder exchange; upgrade both peers together. Existing folders default to send-receive, and policy negotiation does not reset causal history or lane cursors. Earlier protocol versions are rejected before exchanging transfer batches. Identities, configuration, indexed versions, and partial buffers are retained. The earlier upgrade to protocol 5 added lane cursors and partial change indexes; those indexes are built on first startup when upgrading from an older state. Upgrade both devices before reconnecting. Protocol 3 peers (0.1.x) are refused before exchanging batches so their automatic conflict policy cannot participate.
+See [ROADMAP.md](ROADMAP.md) for upcoming performance and operational work. Releases 0.3.2–0.3.3 use **wire protocol 5**. Versions 0.4.0 and 0.4.1 use **wire protocol 6** and refuse protocol 5 before any folder exchange; upgrade both peers together. Existing folders default to send-receive, and policy negotiation does not reset causal history or lane cursors. Earlier protocol versions are rejected before exchanging transfer batches. Identities, configuration, indexed versions, and partial buffers are retained. The earlier upgrade to protocol 5 added lane cursors and partial change indexes; those indexes are built on first startup when upgrading from an older state. Upgrade both devices before reconnecting. Protocol 3 peers (0.1.x) are refused before exchanging batches so their automatic conflict policy cannot participate.
 
 ## License
 
