@@ -15,8 +15,36 @@ pub fn open(home: &Path) -> Result<Connection> {
       CREATE INDEX IF NOT EXISTS conflicts_path ON conflicts(folder,path);
       CREATE TABLE IF NOT EXISTS lane_cursors(peer TEXT NOT NULL,folder TEXT NOT NULL,lanes INTEGER NOT NULL,lane INTEGER NOT NULL,value INTEGER NOT NULL,PRIMARY KEY(peer,folder,lanes,lane));
       CREATE INDEX IF NOT EXISTS small_changes ON entries(folder,seq) WHERE json_extract(data,'$.kind')!='File' OR json_extract(data,'$.size')<1048576;
-      CREATE INDEX IF NOT EXISTS bulk_changes ON entries(folder,seq) WHERE json_extract(data,'$.kind')='File' AND json_extract(data,'$.size')>=1048576;")?;
+      CREATE INDEX IF NOT EXISTS bulk_changes ON entries(folder,seq) WHERE json_extract(data,'$.kind')='File' AND json_extract(data,'$.size')>=1048576;
+      CREATE TABLE IF NOT EXISTS receiving(folder TEXT NOT NULL,path TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(folder,path));")?;
     Ok(c)
+}
+/// Record incoming versions before a batch publishes them. The rows commit on their own
+/// and are removed with the batch, so they survive only a batch that never committed.
+pub fn expect_received<'a>(
+    c: &Connection,
+    folder: &str,
+    entries: impl IntoIterator<Item = &'a Entry>,
+) -> Result<()> {
+    let mut q = c.prepare_cached(
+        "INSERT INTO receiving VALUES(?1,?2,?3) ON CONFLICT(folder,path) DO UPDATE SET data=excluded.data",
+    )?;
+    for e in entries {
+        q.execute(params![folder, e.path, serde_json::to_string(e)?])?;
+    }
+    Ok(())
+}
+pub fn received(c: &Connection, folder: &str, path: &str) -> Result<Option<Entry>> {
+    c.prepare_cached("SELECT data FROM receiving WHERE folder=?1 AND path=?2")?
+        .query_row(params![folder, path], |r| r.get::<_, String>(0))
+        .optional()?
+        .map(|s| Ok(serde_json::from_str(&s)?))
+        .transpose()
+}
+pub fn forget_received(c: &Connection, folder: &str, path: &str) -> Result<()> {
+    c.prepare_cached("DELETE FROM receiving WHERE folder=?1 AND path=?2")?
+        .execute(params![folder, path])?;
+    Ok(())
 }
 pub fn get(c: &Connection, folder: &str, path: &str) -> Result<Option<Entry>> {
     let r: Option<(String, String)> = c

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2
+
+- Record each incoming version in the index before a batch renames it into place, and remove the record in the batch's own commit. A batch can stop after publishing files but before committing, through a daemon stop (the process exits within about 80 ms), a crash, a pause, a dropped connection or an error. The next scan or retry now recognises those files as the peer's versions. Previously it indexed them as local edits with the receiver's own version counter. On a receive-only folder that counter never reaches the sender, so every later version of the path became a conflict. A live receiver restarted mid-batch collected 102 conflict copies of a SQLite file rewritten every minute.
+- Add `ysync conflict resolve --take-incoming FOLDER ID`. With the daemon stopped, it verifies the preserved incoming file, puts it in place and archives the local version under `.ysync/versions`. On a receive-only folder it drops the receiver's own counter, so later versions of the path apply normally again. Elsewhere the result is a new local version that propagates. It refuses an older record while a newer incoming version of the same path is pending, and clears the older records it supersedes. Retention treats those archives as resolved, ignoring the dropped counter on receive-only folders. The TUI conflict panel still offers keep-local only.
+- Add a `receiving` table to the index, created on first start. Wire protocol 6 and configuration are unchanged, so 0.4.x peers synchronize with each other. Recovery covers batches received by 0.4.2; a path already stuck this way needs `--take-incoming` once.
+
 ## 0.4.1
 
 - Check every entry a directory lists with one stat through that directory's open, verified handle. Reopen parent directories from the folder root only for entries that are new, changed or could not be read. An unchanged rescan of a 120,000-file fixture fell from 29.6 s to 2.2 s of CPU time on a Mac (single trial); first indexing improves less because hashing dominates. Indexed content, deletion inference and symlink-parent checks are unchanged.

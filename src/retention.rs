@@ -125,6 +125,11 @@ pub fn run(home: &Path, root: &engine::Root, policy: &Policy, apply: bool) -> Re
     };
     let at = now();
     let mut versions = vec![];
+    // Taking an incoming version on a receive-only folder drops this device's counter,
+    // which only its never-sent local edits carried; resolved records still include it.
+    let unsent = (root.folder.mode == crate::config::FolderMode::ReceiveOnly)
+        .then(|| crate::config::identity(home).map(|i| i.0))
+        .transpose()?;
     // Disabled categories incur no directory walks.
     for category in ["versions", "tmp", "conflicts"] {
         if (category == "versions"
@@ -210,11 +215,15 @@ pub fn run(home: &Path, root: &engine::Root, policy: &Policy, apply: bool) -> Re
                         Ok(v) => v,
                         Err(_) => continue,
                     };
+                let mut local = record.local.clock.clone();
+                if let Some(device) = &unsent {
+                    local.remove(device);
+                }
                 let resolved =
                     store::get(&c, &root.folder.id, &record.incoming.path)?.is_some_and(|e| {
-                        [&record.local, &record.incoming].iter().all(|old| {
+                        [&local, &record.incoming.clock].iter().all(|old| {
                             matches!(
-                                crate::model::relation(&old.clock, &e.clock),
+                                crate::model::relation(old, &e.clock),
                                 crate::model::Relation::Before | crate::model::Relation::Equal
                             )
                         })
@@ -478,6 +487,48 @@ mod tests {
         assert_eq!(run(h.path(), &r, &policy, true).unwrap().removed, 1);
         assert!(!r.dir.exists(manifest));
         assert_eq!(fs::read(f.path().join("file")).unwrap(), b"local");
+    }
+    #[test]
+    fn archives_taken_on_a_receive_only_folder_expire() {
+        let (h, f, _) = fixture();
+        config::edit(h.path(), |c| {
+            c.folders[0].mode = config::FolderMode::ReceiveOnly;
+            Ok(())
+        })
+        .unwrap();
+        let r = pairing::root(h.path(), "code").unwrap();
+        let device = config::identity(h.path()).unwrap().0;
+        r.dir.write("file", b"local").unwrap();
+        engine::scan(&r, h.path(), &device, None, |_| {}).unwrap();
+        let c = store::open(h.path()).unwrap();
+        let local = store::get(&c, "code", "file").unwrap().unwrap();
+        let mut remote = local.clone();
+        remote.clock = [("b".repeat(64), 1)].into();
+        remote.hash = blake3::hash(b"remote").to_hex().to_string();
+        remote.size = 6;
+        let (p, mut tmp) = engine::temp_file(&r).unwrap();
+        std::io::Write::write_all(&mut tmp, b"remote").unwrap();
+        drop(tmp);
+        crate::conflicts::save(&c, &r, &local, &remote, Some(&p)).unwrap();
+        let record = crate::conflicts::list(&c).unwrap().remove(0);
+        let manifest = format!(".ysync/conflicts/{}.json", record.id);
+        old(&f.path().join(&manifest));
+        let policy = Policy {
+            resolved_conflicts_days: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(run(h.path(), &r, &policy, true).unwrap().removed, 0);
+        crate::conflicts::take_incoming(h.path(), "code", &record.id).unwrap();
+        assert!(
+            !store::get(&c, "code", "file")
+                .unwrap()
+                .unwrap()
+                .clock
+                .contains_key(&device)
+        );
+        assert_eq!(run(h.path(), &r, &policy, true).unwrap().removed, 1);
+        assert!(!r.dir.exists(manifest));
+        assert_eq!(fs::read(f.path().join("file")).unwrap(), b"remote");
     }
     #[test]
     fn symlinked_archive_area_and_running_manual_cleanup_are_rejected() {

@@ -8,6 +8,8 @@ Version **0.4.0** adds explicit folder directions and uses **wire protocol 6**. 
 
 Version **0.4.1** keeps wire protocol 6, so it synchronizes with 0.4.0 peers and each machine can upgrade on its own. It makes rescans of unchanged folders much cheaper and lets `ysync service` manage a daemon started by Homebrew.
 
+Version **0.4.2** also keeps wire protocol 6. A receiver stopped partway through a batch no longer turns the files it already published into local edits, which on a receive-only folder made every later version of those paths a conflict. `ysync conflict resolve --take-incoming` replaces a local version with the incoming one.
+
 ## Install
 
 ### Homebrew
@@ -30,13 +32,13 @@ Use Rust/Cargo 1.88 or newer and a C compiler. SQLite is bundled; no separate SQ
 
 ```sh
 cargo install --git https://github.com/yetidevworks/ysync.git \
-  --tag v0.4.1 --locked ysync
+  --tag v0.4.2 --locked ysync
 ysync --version
 ```
 
 Cargo installs the command under `~/.cargo/bin`; make sure that directory is on your PATH. With a rustup installation, `source "$HOME/.cargo/env"` activates it in the current shell. Installation builds the binary but does not start a service or change your sync configuration. This crate is not published to crates.io. Cargo's [Git installation options](https://doc.rust-lang.org/cargo/commands/cargo-install.html) support selecting a tag and using the committed dependency lockfile.
 
-For the latest main branch, replace `--tag v0.4.1` with `--branch main`. To update an installed service: stop it, install the desired tag with `--force`, and start it again. Reinstall the service definition if the binary's installation path changes.
+For the latest main branch, replace `--tag v0.4.2` with `--branch main`. To update an installed service: stop it, install the desired tag with `--force`, and start it again. Reinstall the service definition if the binary's installation path changes.
 
 ### Download a binary
 
@@ -54,13 +56,13 @@ Linux archives require glibc 2.35 or newer. Build with Cargo on older systems. M
 For example, on an Apple Silicon Mac:
 
 ```sh
-curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.4.1/ysync-v0.4.1-aarch64-apple-darwin.tar.gz
-curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.4.1/SHA256SUMS
-shasum -a 256 ysync-v0.4.1-aarch64-apple-darwin.tar.gz
+curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.4.2/ysync-v0.4.2-aarch64-apple-darwin.tar.gz
+curl -fLO https://github.com/yetidevworks/ysync/releases/download/v0.4.2/SHA256SUMS
+shasum -a 256 ysync-v0.4.2-aarch64-apple-darwin.tar.gz
 # Compare the result with its matching entry in SHA256SUMS.
-tar -xzf ysync-v0.4.1-aarch64-apple-darwin.tar.gz
+tar -xzf ysync-v0.4.2-aarch64-apple-darwin.tar.gz
 mkdir -p ~/.local/bin
-install -m 755 ysync-v0.4.1-aarch64-apple-darwin/ysync ~/.local/bin/ysync
+install -m 755 ysync-v0.4.2-aarch64-apple-darwin/ysync ~/.local/bin/ysync
 ```
 
 Put `~/.local/bin` on your PATH if you use this location. `ysync --help` shows all commands.
@@ -190,7 +192,7 @@ Press `c` to review pending conflicts. Use `f` for the selected folder or all fo
 
 Press `l` to **keep the reviewed current local version**, then `y` to confirm that one record; any other key cancels. Stop the local daemon first (for Homebrew: `brew services stop ysync`) and leave the monitor open. Resolution acquires the daemon lock, checks the file again, rejects stale reviews, retains the incoming archive, and leaves other conflict records pending. Keeping a local deletion propagates that deletion. Restart the service afterward (`brew services start ysync`) to propagate the decision.
 
-This panel supports the existing keep-local resolver. To choose incoming content or manually merge, compare the preserved archive externally, edit the working file deliberately, refresh the review, and keep that reviewed local result. There is no automatic incoming replacement or bulk resolution. Review alone never resolves records. Text previews read at most 64 KiB and verify hashes; binary, oversized, missing, or changed archives display an explanation. A changed working file can be hashed on request up to 16 MiB; larger changed files must first be indexed by the scanner. Database queries and selected-path reads run on a single background worker, not every dashboard refresh.
+This panel supports the existing keep-local resolver. To take the incoming version unchanged, use `ysync conflict resolve --take-incoming` (see [Conflicts](#conflicts-existing-work-stays-in-place)). To merge, compare the preserved archive externally, edit the working file deliberately, refresh the review, and keep that reviewed local result. There is no automatic incoming replacement or bulk resolution. Review alone never resolves records. Text previews read at most 64 KiB and verify hashes; binary, oversized, missing, or changed archives display an explanation. A changed working file can be hashed on request up to 16 MiB; larger changed files must first be indexed by the scanner. Database queries and selected-path reads run on a single background worker, not every dashboard refresh.
 
 The activity window is bounded to 64 daemon events, including at most 16 index records so reconciliation does not evict every useful message. It is not a persistent log. **Index** means an incoming record was reconciled; it does not mean a working file was overwritten. Receive payload includes preserved incoming conflict versions. JSON field `received_entries` retains its existing meaning as reconciled records. Graphs show up to 60 observed snapshots with independent scales and reset when the daemon restarts. The header identifies monitor and daemon versions separately; older daemons report an unknown version.
 
@@ -232,7 +234,16 @@ brew services stop ysync
 ysync conflict resolve projects FULL_CONFLICT_ID --keep-local
 ```
 
-This command does not copy anything over the working file. It records the current local version as a deliberate resolution of the selected incoming version. When synchronization resumes, that decision propagates. To choose incoming content, first review and copy/merge the saved payload into the working file, then run the same explicit resolution command. Archives remain retained. Conflicting edits made after the choice produce a new conflict.
+This command does not copy anything over the working file. It records the current local version as a deliberate resolution of the selected incoming version. When synchronization resumes, that decision propagates. To merge, first copy or merge the saved payload into the working file, then run the same explicit resolution command. Archives remain retained. Conflicting edits made after the choice produce a new conflict.
+
+To take the incoming version as it is (0.4.2), stop the daemon and select the record:
+
+```sh
+brew services stop ysync
+ysync conflict resolve projects FULL_CONFLICT_ID --take-incoming
+```
+
+The command verifies the preserved incoming file against its record, puts it at the working path and prints where the replaced local version was archived under `.ysync/versions/`. On a receive-only folder it also drops this device's own counter from the path's version vector. That counter came from a local edit the folder never sent, and while it remains every later source version of the path is another conflict. On other folders the result is a new local version that propagates like any edit. If a newer incoming version of the same path is pending, the command refuses and names it; taking the newest clears the older records for that path. The incoming archive is retained until retention removes it.
 
 ## Archive retention (0.3.2)
 
@@ -262,7 +273,7 @@ ysync retention configure --disable
 
 The daemon checks configuration once per minute (starting one minute after startup), runs an enabled policy at most hourly per folder, and retries busy folders on the next check. Policy changes make the next check eligible. Paused folders are skipped. Maintenance uses the folder gate, skips locked active downloads, and reports completed cleanup/errors in activity events.
 
-Unresolved conflicts are never eligible. A conflict archive without a pending database row is eligible only if the indexed version includes both sides' histories; crash-recovery manifests with uncommitted histories remain protected. The cleaner recognizes current version manifests, UUID staging files, resumable `.part` files, and resolved conflict manifests. Unknown, malformed, symlinked, or otherwise unsupported artifacts are preserved. A category with over 100,000 directory entries stops the run before deletion rather than allocating without a bound; very large historical stores currently require manual maintenance. Retention does not cover pairing audit plans or the independent backups made during live reconciliation.
+Unresolved conflicts are never eligible. A conflict archive without a pending database row is eligible only if the indexed version includes both sides' histories. On a receive-only folder the local side is compared without this device's own counter, which `--take-incoming` drops. Crash-recovery manifests with uncommitted histories remain protected. The cleaner recognizes current version manifests, UUID staging files, resumable `.part` files, and resolved conflict manifests. Unknown, malformed, symlinked, or otherwise unsupported artifacts are preserved. A category with over 100,000 directory entries stops the run before deletion rather than allocating without a bound; very large historical stores currently require manual maintenance. Retention does not cover pairing audit plans or the independent backups made during live reconciliation.
 
 ## Linux watch capacity
 
@@ -344,7 +355,7 @@ ysync folder list
 
 Changing a mode retains files, version vectors, delivery cursors and pending conflicts. It does not select a winner for pre-existing differences: use the reviewed initial-pairing workflow when establishing a source baseline. Switching back to `send-receive` permits previously unsent local changes to participate in synchronization. Pause/review those changes before doing so. Edit policy through the command while stopped, rather than editing configuration during transfers.
 
-`receive-only` is a conservative receiver, not an automatic destructive mirror. An accidental receiver edit is never sent upstream and is not silently discarded. A later conflicting source edit is archived for review while the receiver's working content remains. Receiver-only files/deletions can therefore remain local differences; an unchanged source is not automatically replayed to revert them. Continuous forced mirroring and a local-difference/revert panel are not implemented. Send-only likewise does not force its contents over independently modified receivers. Directionality does not provide application-consistent database snapshots.
+`receive-only` is a conservative receiver, not an automatic destructive mirror. An accidental receiver edit is never sent upstream and is not silently discarded. A later conflicting source edit is archived for review while the receiver's working content remains. Receiver-only files/deletions can therefore remain local differences; an unchanged source is not automatically replayed to revert them. Once a source edit conflicts with such a difference, `ysync conflict resolve --take-incoming` discards the local version (archived) and lets later source versions of that path apply again. Continuous forced mirroring and a local-difference/revert panel are not implemented. Send-only likewise does not force its contents over independently modified receivers. Directionality does not provide application-consistent database snapshots.
 
 The TUI folder table/details and JSON status include `mode`. Outbound delivery says `sending disabled` for blocked directions instead of falsely displaying an empty, delivered queue. The receiver's scanner and conflict indicators still matter; a disabled direction is not proof that both trees match.
 
@@ -399,7 +410,7 @@ Delta selection requires estimated payload reuse to cover signature/plan metadat
 - **Watching:** native FSEvents on macOS and inotify on Linux via `notify`. Linux registers individual included directories during scanning, before listing their children, and excludes ignored subtrees and internal staging/version directories. One additional control watch observes the folder marker. Directory moves/removals update those registrations; macOS uses a recursive root stream and filters ignored paths in the callback.
 - **Event scheduling:** callbacks do no filesystem reads or hashing. They filter read/open events and ignored paths, retain close-after-write events, and coalesce paths into a bounded 4,096-path set with a one-slot wake signal. Updates wait for 100 ms of quiet, with a one-second maximum batching delay under continuous activity. An ancestor subtree event absorbs queued descendant events. Directory metadata events inspect only the directory entry; file/directory deletion and rename reconcile only affected path ranges in the index, with child tombstones before parent tombstones. Unchanged metadata fingerprints reuse cached hashes, including notifications caused by incoming writes.
 - **Reconciliation and recovery:** startup, explicit ignore-rule changes, missed-event/overflow signals, and the periodic safety interval trigger full reconciliation. Overflow discards the bounded event set in favor of one repair scan and reestablishes native coverage. Unreadable/unsupported paths are reported while accessible files continue indexing; deletion inference is suspended after an incomplete scan. Scoped failures get up to three bounded retries. Watch registration failures fall back to polling and retry with backoff; successful reattachment performs a full reconciliation. Pausing a folder releases its native watcher. Cached roots and ignore matchers avoid rebuilding them during idle wakeups.
-- **Correctness:** causal version vectors distinguish later edits from concurrent edits. Concurrent differences preserve the working version on each device and save the incoming version as a pending conflict. This includes initial pairing, permission/type differences, and edit/delete conflicts. No hash or timestamp chooses a winner. Pending conflicts do not merge version vectors or claim content convergence; only an explicit resolution can choose between independent versions. Remote bytes are checksummed, staged, and flushed before acknowledgment. Updates use same-filesystem renames; prior content is retained. A crash before acknowledgment causes the batch to be replayed; recovery may conservatively create extra version/conflict records.
+- **Correctness:** causal version vectors distinguish later edits from concurrent edits. Concurrent differences preserve the working version on each device and save the incoming version as a pending conflict. This includes initial pairing, permission/type differences, and edit/delete conflicts. No hash or timestamp chooses a winner. Pending conflicts do not merge version vectors or claim content convergence; only an explicit resolution can choose between independent versions. Remote bytes are checksummed, staged, and flushed before acknowledgment. Updates use same-filesystem renames; prior content is retained. Each incoming version is recorded before publication, so files that a stopped or crashed batch already put in place are recognised as the peer's versions by the next scan or retry (0.4.2). A crash before acknowledgment causes the batch to be replayed; recovery may conservatively create extra version/conflict records.
 - **Paths:** relative paths are validated; reserved state paths and traversal are rejected. Filesystem operations use directory capabilities (`cap-std`). Symlink parents cannot redirect a transfer outside its root. NFC/lowercase name collisions are rejected by the index rather than silently overwriting a differently named file.
 
 The scanner opens checked parent directories one component at a time and reuses the resulting handle for file metadata and reads. Device/inode checks reject a directory replaced while it is being opened. Frequently used index statements are prepared once per connection and reused. This removes repeated root-relative parent walks and SQL compilation without changing the index format or wire protocol.
@@ -446,7 +457,7 @@ The benchmark creates two isolated local instances and reports bootstrap duratio
 
 Run `cargo bench --bench delta --locked` for the synthetic content-defined versus fixed-block comparison, or add `--delta --files 1 --size 33554432` to the SSH benchmark for a 32 MiB test file with three edits.
 
-See [ROADMAP.md](ROADMAP.md) for upcoming performance and operational work. Releases 0.3.2–0.3.3 use **wire protocol 5**. Versions 0.4.0 and 0.4.1 use **wire protocol 6** and refuse protocol 5 before any folder exchange; upgrade both peers together. Existing folders default to send-receive, and policy negotiation does not reset causal history or lane cursors. Earlier protocol versions are rejected before exchanging transfer batches. Identities, configuration, indexed versions, and partial buffers are retained. The earlier upgrade to protocol 5 added lane cursors and partial change indexes; those indexes are built on first startup when upgrading from an older state. Upgrade both devices before reconnecting. Protocol 3 peers (0.1.x) are refused before exchanging batches so their automatic conflict policy cannot participate.
+See [ROADMAP.md](ROADMAP.md) for upcoming performance and operational work. Releases 0.3.2–0.3.3 use **wire protocol 5**. Versions 0.4.0 through 0.4.2 use **wire protocol 6** and refuse protocol 5 before any folder exchange; upgrade both peers together. Existing folders default to send-receive, and policy negotiation does not reset causal history or lane cursors. Earlier protocol versions are rejected before exchanging transfer batches. Identities, configuration, indexed versions, and partial buffers are retained. The earlier upgrade to protocol 5 added lane cursors and partial change indexes; those indexes are built on first startup when upgrading from an older state. Upgrade both devices before reconnecting. Protocol 3 peers (0.1.x) are refused before exchanging batches so their automatic conflict policy cannot participate.
 
 ## License
 

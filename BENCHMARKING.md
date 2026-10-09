@@ -1,6 +1,6 @@
 # Evidence and correctness gates
 
-Versions 0.4.0 and 0.4.1 use protocol 6; releases 0.3.2–0.3.3 use protocol 5. The initial evidence records identify the tested 0.4.0-dev candidate and its executable fingerprints. Tests and binaries must identify which they use; a passing development run is not evidence that an installed older daemon enforces the new policies.
+Versions 0.4.0 through 0.4.2 use protocol 6; releases 0.3.2–0.3.3 use protocol 5. The initial evidence records identify the tested 0.4.0-dev candidate and its executable fingerprints. Tests and binaries must identify which they use; a passing development run is not evidence that an installed older daemon enforces the new policies.
 
 ## Repeatable evidence now available
 

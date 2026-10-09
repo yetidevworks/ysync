@@ -161,19 +161,7 @@ fn resolve_local(
     id: &str,
     expected: Option<&model::Entry>,
 ) -> Result<()> {
-    ensure!(
-        id.len() == 64 && hex::decode(id).is_ok(),
-        "use the full conflict ID"
-    );
-    let lock = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(home.join("daemon.lock"))?;
-    fs2::FileExt::try_lock_exclusive(&lock)
-        .context("stop the ysync daemon before resolving a conflict")?;
+    let _lock = stopped(home, id)?;
     let configured = config::load(home)?
         .folders
         .into_iter()
@@ -181,14 +169,7 @@ fn resolve_local(
         .context("unknown folder")?;
     let root = engine::Root::open(configured, Arc::new(Mutex::new(())))?;
     let mut c = store::open(home)?;
-    let record: Conflict = serde_json::from_str(
-        &c.query_row(
-            "SELECT data FROM conflicts WHERE folder=?1 AND id=?2",
-            params![folder, id],
-            |r| r.get::<_, String>(0),
-        )
-        .context("unknown or already resolved conflict")?,
-    )?;
+    let record = load(&c, folder, id)?;
     ensure!(
         !root.excluded(&record.incoming.path),
         "path is now ignored; review the conflict before changing exclusions"
@@ -232,6 +213,189 @@ fn resolve_local(
     )?;
     tx.commit()?;
     Ok(())
+}
+
+/// The user explicitly replaces the local version with this incoming one and returns
+/// where the replaced local version was archived. A receive-only folder never sent its
+/// local edit, so the edit's version counter is dropped and later incoming versions apply
+/// normally again. Elsewhere the result is a new local version that propagates.
+/// Stop the daemon first.
+pub fn take_incoming(home: &Path, folder: &str, id: &str) -> Result<Option<String>> {
+    let _lock = stopped(home, id)?;
+    let configured = config::load(home)?
+        .folders
+        .into_iter()
+        .find(|f| f.id == folder)
+        .context("unknown folder")?;
+    let receive_only = configured.mode == config::FolderMode::ReceiveOnly;
+    let root = engine::Root::open(configured, Arc::new(Mutex::new(())))?;
+    let mut c = store::open(home)?;
+    let record = load(&c, folder, id)?;
+    let path = record.incoming.path.clone();
+    ensure!(
+        !root.excluded(&path),
+        "path is now ignored; review the conflict before changing exclusions"
+    );
+    let others = for_path(&c, folder, &path)?;
+    let newest = others.iter().fold(&record, |newest, r| {
+        if model::relation(&newest.incoming.clock, &r.incoming.clock) == model::Relation::Before {
+            r
+        } else {
+            newest
+        }
+    });
+    ensure!(
+        newest.id == record.id,
+        "a newer incoming version of {path} is pending; take {} instead",
+        newest.id
+    );
+    let temp = match record.incoming.kind {
+        model::Kind::File => Some(copy_payload(&root, &record)?),
+        _ => None,
+    };
+    let result = (|| {
+        let device = config::identity(home)?.0;
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        engine::refresh(&tx, &root, &path, &device, 0, true)?;
+        let local = store::get(&tx, folder, &path)?;
+        let mut next = record.incoming.clone();
+        let mut base = local.as_ref().map(|e| e.clock.clone()).unwrap_or_default();
+        if receive_only {
+            base.remove(&device);
+        }
+        next.clock = model::merge(&base, &record.incoming.clock);
+        if !receive_only {
+            let n = next.clock.entry(device).or_default();
+            *n = n.checked_add(1).context("version counter exhausted")?;
+        }
+        let (stamp, archived) =
+            engine::place(&root, &record.incoming, local.as_ref(), temp.as_deref())?;
+        let recorded = (|| -> Result<()> {
+            if matches!(
+                record.incoming.kind,
+                model::Kind::File | model::Kind::Directory
+            ) {
+                root.dir.open(&path)?.into_std().sync_all()?;
+            }
+            engine::sync_directories(&root, std::slice::from_ref(&record.incoming))?;
+            next.stamp = stamp;
+            store::put(&tx, folder, &mut next, 0)?;
+            store::forget_received(&tx, folder, &path)?;
+            // Older records for this path held versions the result includes, against a
+            // local version it replaced.
+            let includes = |a: &model::Entry, b: &model::Entry| {
+                matches!(
+                    model::relation(&a.clock, &b.clock),
+                    model::Relation::Before | model::Relation::Equal
+                )
+            };
+            for r in &others {
+                if r.id == record.id
+                    || (includes(&r.incoming, &next)
+                        && local.as_ref().is_some_and(|l| includes(&r.local, l)))
+                {
+                    tx.execute(
+                        "DELETE FROM conflicts WHERE folder=?1 AND id=?2",
+                        params![folder, r.id],
+                    )?;
+                }
+            }
+            tx.commit()?;
+            Ok(())
+        })();
+        // Running the command again indexes the placed file and records the resolution.
+        recorded.with_context(|| {
+            let kept = archived.as_deref().map_or(String::new(), |a| {
+                format!("; the replaced local version is at {a}")
+            });
+            format!(
+                "the incoming version is in place but the resolution was not recorded{kept}. Run this command again before starting the daemon"
+            )
+        })?;
+        Ok(archived)
+    })();
+    if let Some(temp) = temp {
+        // Already gone once published.
+        let _ = root.dir.remove_file(temp);
+    }
+    result
+}
+
+fn stopped(home: &Path, id: &str) -> Result<fs::File> {
+    ensure!(
+        id.len() == 64 && hex::decode(id).is_ok(),
+        "use the full conflict ID"
+    );
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(home.join("daemon.lock"))?;
+    fs2::FileExt::try_lock_exclusive(&lock)
+        .context("stop the ysync daemon before resolving a conflict")?;
+    Ok(lock)
+}
+fn load(c: &Connection, folder: &str, id: &str) -> Result<Conflict> {
+    Ok(serde_json::from_str(
+        &c.query_row(
+            "SELECT data FROM conflicts WHERE folder=?1 AND id=?2",
+            params![folder, id],
+            |r| r.get::<_, String>(0),
+        )
+        .context("unknown or already resolved conflict")?,
+    )?)
+}
+fn for_path(c: &Connection, folder: &str, path: &str) -> Result<Vec<Conflict>> {
+    let mut q = c.prepare("SELECT data FROM conflicts WHERE folder=?1 AND path=?2")?;
+    q.query_map(params![folder, path], |r| r.get::<_, String>(0))?
+        .map(|r| Ok(serde_json::from_str(&r?)?))
+        .collect()
+}
+/// Copy the preserved incoming file to a private temp file, verified against its record.
+/// The archive itself stays in place until retention removes it.
+fn copy_payload(root: &engine::Root, record: &Conflict) -> Result<String> {
+    use std::io::{Read, Write};
+    let archive = format!(".ysync/conflicts/{}", record.id);
+    ensure!(
+        record.payload.as_deref() == Some(archive.as_str()),
+        "incoming archive unavailable; the record cannot be taken"
+    );
+    let meta = root.dir.symlink_metadata(&archive)?;
+    ensure!(
+        meta.is_file() && !meta.is_symlink(),
+        "incoming archive is not a regular file"
+    );
+    let mut source = root.dir.open(&archive)?;
+    let (temp, mut file) = engine::temp_file(root)?;
+    let copied = (|| {
+        let mut hash = blake3::Hasher::new();
+        let mut bytes = 0u64;
+        let mut buf = vec![0u8; 262144];
+        loop {
+            let n = source.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hash.update(&buf[..n]);
+            file.write_all(&buf[..n])?;
+            bytes += n as u64;
+        }
+        ensure!(
+            bytes == record.incoming.size
+                && hash.finalize().to_hex().as_str() == record.incoming.hash,
+            "incoming archive differs from its record"
+        );
+        file.set_permissions(fs::Permissions::from_mode(record.incoming.mode))?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = copied {
+        let _ = root.dir.remove_file(&temp);
+        return Err(e);
+    }
+    Ok(temp)
 }
 
 /// One bounded page, loaded only when the user opens or refreshes conflict review.
@@ -446,6 +610,170 @@ mod review_tests {
             .into_iter()
             .find(|r| r.incoming.path == path)
             .unwrap()
+    }
+    /// Apply a peer's version of `db`; true when it was recorded as a conflict.
+    fn incoming(c: &Connection, root: &engine::Root, device: &str, data: &[u8], n: u64) -> bool {
+        let (temp, mut f) = engine::temp_file(root).unwrap();
+        std::io::Write::write_all(&mut f, data).unwrap();
+        f.set_permissions(fs::Permissions::from_mode(0o644))
+            .unwrap();
+        let e = model::Entry {
+            path: "db".into(),
+            kind: model::Kind::File,
+            size: data.len() as u64,
+            hash: blake3::hash(data).to_hex().to_string(),
+            target: None,
+            mode: 0o644,
+            clock: [("b".repeat(64), n)].into(),
+            seq: 0,
+            stamp: String::new(),
+        };
+        engine::apply(c, root, device, &e, Some(&temp)).unwrap()
+    }
+    #[test]
+    fn taking_the_newest_incoming_version_ends_repeated_receive_only_conflicts() {
+        let (state, files, root, device) = fixture();
+        config::edit(state.path(), |c| {
+            c.folders[0].mode = config::FolderMode::ReceiveOnly;
+            Ok(())
+        })
+        .unwrap();
+        let c = store::open(state.path()).unwrap();
+        assert!(!incoming(&c, &root, &device, b"one", 1));
+        // A local edit this folder never sends conflicts with every later version.
+        fs::write(files.path().join("db"), b"local").unwrap();
+        engine::refresh(&c, &root, "db", &device, 0, false).unwrap();
+        assert!(incoming(&c, &root, &device, b"two", 2));
+        assert!(incoming(&c, &root, &device, b"three", 3));
+        let records = list(&c).unwrap();
+        let id = |data: &[u8]| {
+            let hash = blake3::hash(data).to_hex().to_string();
+            records
+                .iter()
+                .find(|r| r.incoming.hash == hash)
+                .unwrap()
+                .id
+                .clone()
+        };
+        let older = take_incoming(state.path(), "code", &id(b"two"))
+            .unwrap_err()
+            .to_string();
+        assert!(older.contains(&id(b"three")), "{older}");
+        assert_eq!(fs::read(files.path().join("db")).unwrap(), b"local");
+        let archived = take_incoming(state.path(), "code", &id(b"three"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(fs::read(files.path().join("db")).unwrap(), b"three");
+        assert_eq!(fs::read(files.path().join(archived)).unwrap(), b"local");
+        assert!(list(&c).unwrap().is_empty());
+        let indexed = store::get(&c, "code", "db").unwrap().unwrap();
+        assert_eq!(indexed.clock, [("b".repeat(64), 3)].into());
+        assert_eq!(indexed.mode, 0o644);
+        assert!(!incoming(&c, &root, &device, b"four", 4));
+        assert_eq!(fs::read(files.path().join("db")).unwrap(), b"four");
+        assert!(list(&c).unwrap().is_empty());
+    }
+    fn receive_only_conflict(
+        deleted: bool,
+    ) -> (tempfile::TempDir, tempfile::TempDir, Connection, String) {
+        let (state, files, root, device) = fixture();
+        config::edit(state.path(), |c| {
+            c.folders[0].mode = config::FolderMode::ReceiveOnly;
+            Ok(())
+        })
+        .unwrap();
+        let c = store::open(state.path()).unwrap();
+        assert!(!incoming(&c, &root, &device, b"one", 1));
+        fs::write(files.path().join("db"), b"local").unwrap();
+        engine::refresh(&c, &root, "db", &device, 0, false).unwrap();
+        if deleted {
+            let mut gone = store::get(&c, "code", "db").unwrap().unwrap();
+            gone.kind = model::Kind::Deleted;
+            gone.hash.clear();
+            gone.size = 0;
+            gone.clock = [("b".repeat(64), 2)].into();
+            assert!(engine::apply(&c, &root, &device, &gone, None).unwrap());
+        } else {
+            assert!(incoming(&c, &root, &device, b"two", 2));
+        }
+        (state, files, c, device)
+    }
+    #[test]
+    fn taking_incoming_again_after_an_unrecorded_attempt_finishes_it() {
+        let (state, files, c, device) = receive_only_conflict(false);
+        let id = list(&c).unwrap()[0].id.clone();
+        c.execute_batch(
+            "CREATE TRIGGER stop BEFORE DELETE ON conflicts BEGIN SELECT RAISE(ABORT,'stopped'); END;",
+        )
+        .unwrap();
+        let error = format!(
+            "{:#}",
+            take_incoming(state.path(), "code", &id).unwrap_err()
+        );
+        assert!(error.contains("Run this command again"), "{error}");
+        assert_eq!(fs::read(files.path().join("db")).unwrap(), b"two");
+        assert!(
+            store::get(&c, "code", "db")
+                .unwrap()
+                .unwrap()
+                .clock
+                .contains_key(&device)
+        );
+        c.execute_batch("DROP TRIGGER stop").unwrap();
+        assert!(take_incoming(state.path(), "code", &id).unwrap().is_none());
+        let indexed = store::get(&c, "code", "db").unwrap().unwrap();
+        assert_eq!(indexed.clock, [("b".repeat(64), 2)].into());
+        assert_eq!(indexed.hash, blake3::hash(b"two").to_hex().to_string());
+        assert!(list(&c).unwrap().is_empty());
+        let kept = fs::read_dir(files.path().join(".ysync/versions"))
+            .unwrap()
+            .filter_map(|e| fs::read(e.unwrap().path()).ok())
+            .any(|data| data == b"local");
+        assert!(kept, "the first attempt's archive must remain");
+    }
+    #[test]
+    fn taking_an_incoming_deletion_archives_the_local_file() {
+        let (state, files, c, device) = receive_only_conflict(true);
+        let id = list(&c).unwrap()[0].id.clone();
+        let archived = take_incoming(state.path(), "code", &id).unwrap().unwrap();
+        assert!(!files.path().join("db").exists());
+        assert_eq!(fs::read(files.path().join(archived)).unwrap(), b"local");
+        let indexed = store::get(&c, "code", "db").unwrap().unwrap();
+        assert_eq!(indexed.kind, model::Kind::Deleted);
+        assert!(!indexed.clock.contains_key(&device));
+        assert!(list(&c).unwrap().is_empty());
+    }
+    #[test]
+    fn taking_incoming_on_a_two_way_folder_is_a_new_local_version() {
+        let (state, files, root, device) = fixture();
+        let c = store::open(state.path()).unwrap();
+        assert!(!incoming(&c, &root, &device, b"one", 1));
+        fs::write(files.path().join("db"), b"local").unwrap();
+        engine::refresh(&c, &root, "db", &device, 0, false).unwrap();
+        assert!(incoming(&c, &root, &device, b"two", 2));
+        let id = list(&c).unwrap()[0].id.clone();
+        let lock = fs::File::create(state.path().join("daemon.lock")).unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        assert!(
+            take_incoming(state.path(), "code", &id)
+                .unwrap_err()
+                .to_string()
+                .contains("stop the ysync daemon")
+        );
+        drop(lock);
+        let archive = files.path().join(".ysync/conflicts").join(&id);
+        fs::rename(&archive, files.path().join("moved")).unwrap();
+        assert!(take_incoming(state.path(), "code", &id).is_err());
+        assert_eq!(fs::read(files.path().join("db")).unwrap(), b"local");
+        fs::rename(files.path().join("moved"), &archive).unwrap();
+        take_incoming(state.path(), "code", &id).unwrap();
+        assert_eq!(fs::read(files.path().join("db")).unwrap(), b"two");
+        let indexed = store::get(&c, "code", "db").unwrap().unwrap();
+        assert_eq!(
+            indexed.clock,
+            [("b".repeat(64), 2), (device.clone(), 2)].into()
+        );
+        assert!(list(&c).unwrap().is_empty());
     }
     #[test]
     fn review_and_confirm_guard_stale_content_and_preserve_unrelated_records() {

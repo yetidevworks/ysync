@@ -186,12 +186,17 @@ enum ConflictCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Keep the current local version (after any manual merge). Stop the daemon first.
+    /// Keep the local version or take the incoming one. Stop the daemon first.
+    #[command(group(clap::ArgGroup::new("choice").required(true).args(["keep_local", "take_incoming"])))]
     Resolve {
         folder: String,
         id: String,
-        #[arg(long, required = true)]
+        /// Keep the current local version (after any manual merge)
+        #[arg(long)]
         keep_local: bool,
+        /// Replace the local version with this incoming one. The local version is archived
+        #[arg(long)]
+        take_incoming: bool,
     },
 }
 #[derive(Subcommand)]
@@ -306,13 +311,28 @@ fn main() -> Result<()> {
                 folder,
                 id,
                 keep_local: true,
+                ..
             } => {
                 ysync::conflicts::keep_local(&home, &folder, &id)?;
                 println!(
                     "Kept the current local version. The explicit resolution will propagate when synchronization resumes."
                 );
             }
-            ConflictCmd::Resolve { .. } => bail!("explicit --keep-local is required"),
+            ConflictCmd::Resolve { folder, id, .. } => {
+                let archived = ysync::conflicts::take_incoming(&home, &folder, &id)?;
+                println!("Took the incoming version.");
+                if let Some(archived) = archived
+                    && let Some(f) = config::load(&home)?
+                        .folders
+                        .into_iter()
+                        .find(|f| f.id == folder)
+                {
+                    println!(
+                        "The replaced local version is kept at {}.",
+                        f.path.join(archived).display()
+                    );
+                }
+            }
         },
         Cmd::Pairing { command } => match command {
             PairingCmd::Export { folder, output } => {

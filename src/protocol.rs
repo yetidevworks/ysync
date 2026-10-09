@@ -3,7 +3,7 @@ use crate::{
     daemon::Shared,
     delta::{self, Block, Operation, Parameters},
     engine::{self, Root},
-    model::{Entry, Kind},
+    model::{self, Entry, Kind},
     store,
     transfer::{Partial, Resume, accept_resume},
 };
@@ -960,6 +960,26 @@ fn receive_batch(w: &mut Wire, shared: &Shared, expected_folder: &str) -> Result
                     }
                     // Recheck permissions and pause/revocation after the data transfer, before any publication.
                     let _ = directional_root(shared, peer, folder, false)?;
+                    // Files are renamed into place one by one but indexed in one commit. Record
+                    // what may be published first: if the batch never commits (a stop, pause,
+                    // crash or error), scans recognise those files as this peer's versions.
+                    // A record left by such a batch is matched against its file before this
+                    // batch replaces it; the peer may have moved on before any scan ran.
+                    let journal =
+                        c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                    let mut publishing = Vec::new();
+                    for e in entries.iter().filter(|e| !root.excluded(&e.path)) {
+                        if store::received(&journal, folder, &e.path)?.is_some() {
+                            engine::refresh(&journal, root, &e.path, &shared.id, 0, true)?;
+                        }
+                        if store::get(&journal, folder, &e.path)?.is_none_or(|old| {
+                            model::relation(&old.clock, &e.clock) == model::Relation::Before
+                        }) {
+                            publishing.push(e);
+                        }
+                    }
+                    store::expect_received(&journal, folder, publishing)?;
+                    journal.commit()?;
                     let tx =
                         c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                     // Children must be removed before their deleted parents, irrespective of journal order.
@@ -985,6 +1005,9 @@ fn receive_batch(w: &mut Wire, shared: &Shared, expected_folder: &str) -> Result
                     }
                     control.checkpoint()?;
                     engine::sync_directories(root, entries)?;
+                    for e in entries.iter().filter(|e| !root.excluded(&e.path)) {
+                        store::forget_received(&tx, folder, &e.path)?;
+                    }
                     store::set_lane_cursor(&tx, peer, folder, lane, upto)?;
                     tx.commit()?;
                     for e in entries {
@@ -1441,6 +1464,134 @@ mod tests {
             .unwrap(),
             result.0.unwrap()
         );
+    }
+
+    #[test]
+    fn receive_only_replica_recovers_an_uncommitted_batch_at_its_next_scan() {
+        interrupted_receive(true);
+    }
+    #[test]
+    fn receive_only_replica_recovers_an_uncommitted_batch_when_the_sender_moves_on_first() {
+        interrupted_receive(false);
+    }
+    fn interrupted_receive(rescan: bool) {
+        let sender_home = tempfile::tempdir().unwrap();
+        let receiver_home = tempfile::tempdir().unwrap();
+        let sender_files = tempfile::tempdir().unwrap();
+        let receiver_files = tempfile::tempdir().unwrap();
+        let sender_id = config::initialize(sender_home.path(), None, None).unwrap();
+        let receiver_id = config::initialize(receiver_home.path(), None, None).unwrap();
+        for (home, files, peer, mode) in [
+            (
+                sender_home.path(),
+                sender_files.path(),
+                &receiver_id,
+                config::FolderMode::SendOnly,
+            ),
+            (
+                receiver_home.path(),
+                receiver_files.path(),
+                &sender_id,
+                config::FolderMode::ReceiveOnly,
+            ),
+        ] {
+            engine::add_folder_with_mode(home, "code", files, true, mode).unwrap();
+            config::edit(home, |c| {
+                c.peers.push(config::Peer {
+                    id: peer.clone(),
+                    name: "peer".into(),
+                    address: None,
+                    approved: true,
+                    folders: vec!["code".into()],
+                });
+                Ok(())
+            })
+            .unwrap();
+        }
+        let sender = Shared::new(sender_home.path(), sender_id.clone(), String::new());
+        let receiver = Shared::new(receiver_home.path(), receiver_id.clone(), String::new());
+        sender.mark_ready_for_test("code");
+        receiver.mark_ready_for_test("code");
+        let source = root(&sender, &receiver_id, "code").unwrap();
+        let replica = root(&receiver, &sender_id, "code").unwrap();
+        let edit = |data: &[u8]| {
+            std::fs::write(sender_files.path().join("db.sqlite"), data).unwrap();
+            engine::scan(&source, sender_home.path(), &sender_id, None, |_| {}).unwrap();
+        };
+        let exchange = |after| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            std::thread::scope(|scope| {
+                let received = scope.spawn(|| {
+                    let mut wire = Wire::handshake(
+                        listener.accept().unwrap().0,
+                        receiver_home.path(),
+                        None,
+                        false,
+                    )
+                    .unwrap();
+                    receive_batch(&mut wire, &receiver, "code")
+                });
+                let mut wire = Wire::handshake(
+                    TcpStream::connect(addr).unwrap(),
+                    sender_home.path(),
+                    Some(&receiver_id),
+                    true,
+                )
+                .unwrap();
+                let sent = send_batch(&mut wire, &sender, "code", after);
+                (sent, received.join().unwrap())
+            })
+        };
+        let receiver_db = store::open(receiver_home.path()).unwrap();
+        let indexed = || {
+            store::get(&receiver_db, "code", "db.sqlite")
+                .unwrap()
+                .unwrap()
+        };
+        edit(b"one");
+        let (sent, received) = exchange(0);
+        received.unwrap();
+        let cursor = sent.unwrap();
+        // The next batch publishes its file, then fails to commit, as a stop would leave it.
+        edit(b"two");
+        receiver_db
+            .execute_batch(
+                "CREATE TRIGGER stop_before_commit BEFORE INSERT ON cursors
+                 BEGIN SELECT RAISE(ABORT, 'stopped'); END;",
+            )
+            .unwrap();
+        let (sent, received) = exchange(cursor);
+        assert!(sent.is_err() && received.is_err());
+        assert_eq!(
+            std::fs::read(receiver_files.path().join("db.sqlite")).unwrap(),
+            b"two"
+        );
+        assert_eq!(
+            indexed().hash,
+            blake3::hash(b"one").to_hex().to_string(),
+            "the failed batch must not commit"
+        );
+        receiver_db
+            .execute_batch("DROP TRIGGER stop_before_commit")
+            .unwrap();
+        if rescan {
+            // The restart scan finds the published file before the sender retries.
+            engine::scan(&replica, receiver_home.path(), &receiver_id, None, |_| {}).unwrap();
+            assert!(!indexed().clock.contains_key(&receiver_id));
+            assert_eq!(indexed().hash, blake3::hash(b"two").to_hex().to_string());
+        }
+        // The sender has moved on by the time it reconnects; its newer version applies.
+        edit(b"three");
+        let (sent, received) = exchange(cursor);
+        received.unwrap();
+        sent.unwrap();
+        assert_eq!(
+            std::fs::read(receiver_files.path().join("db.sqlite")).unwrap(),
+            b"three"
+        );
+        assert!(!indexed().clock.contains_key(&receiver_id));
+        assert!(crate::conflicts::list(&receiver_db).unwrap().is_empty());
     }
 
     #[test]

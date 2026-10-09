@@ -289,11 +289,40 @@ fn record_observation(
     };
     if old.as_ref().is_some_and(|e| e.same_content(&fresh)) {
         store::mark_seen(c, &root.folder.id, path, &fresh.stamp, seen)?;
+    } else if let Some(mut remote) = delivered(c, root, path, old.as_ref(), &fresh)? {
+        // A receiver published this version and stopped before its batch committed.
+        // It is the peer's version, not a local edit.
+        if let Some(old) = &old {
+            remote.clock = model::merge(&old.clock, &remote.clock);
+        }
+        remote.stamp = fresh.stamp;
+        store::put(c, &root.folder.id, &mut remote, seen)?;
+        store::forget_received(c, &root.folder.id, path)?;
+        crate::conflicts::clear_resolved(c, &root.folder.id, &remote)?;
     } else {
         *fresh.clock.entry(device.into()).or_default() += 1;
         store::put(c, &root.folder.id, &mut fresh, seen)?;
     }
     Ok(())
+}
+/// The recorded incoming version this observation matches, if it is newer than the index.
+fn delivered(
+    c: &Connection,
+    root: &Root,
+    path: &str,
+    old: Option<&Entry>,
+    fresh: &Entry,
+) -> Result<Option<Entry>> {
+    let Some(remote) = store::received(c, &root.folder.id, path)? else {
+        return Ok(None);
+    };
+    let matches = if remote.kind == Kind::Deleted {
+        fresh.kind == Kind::Deleted
+    } else {
+        remote.same_content(fresh)
+    };
+    let newer = old.is_none_or(|e| model::relation(&e.clock, &remote.clock) == Relation::Before);
+    Ok((matches && newer).then_some(remote))
 }
 /// Each path may carry the metadata the walk read through the checked handle of the
 /// directory listing it; a match with the index then needs no further filesystem access.
@@ -808,14 +837,29 @@ pub fn apply(
     if let Some(old) = &old {
         next.clock = model::merge(&old.clock, &remote.clock);
     }
-    check_destination(root, &remote.path, old.as_ref())?;
-    if old.as_ref().is_some_and(|e| e.same_bytes(remote)) {
+    next.stamp = place(root, remote, old.as_ref(), temp)?.0;
+    store::put(c, &root.folder.id, &mut next, 0)?;
+    crate::conflicts::clear_resolved(c, &root.folder.id, &next)?;
+    Ok(false)
+}
+
+/// Put `remote` in place of the indexed `old` version and return the new stamp, along
+/// with where the replaced version was archived. `temp` holds a file's verified content.
+pub(crate) fn place(
+    root: &Root,
+    remote: &Entry,
+    old: Option<&Entry>,
+    temp: Option<&str>,
+) -> Result<(String, Option<String>)> {
+    let mut archived = None;
+    check_destination(root, &remote.path, old)?;
+    if old.is_some_and(|e| e.same_bytes(remote)) {
         // Matching content still needs its clocks merged, but chmod (even to the
         // existing mode) changes ctime and emits native metadata notifications.
         // During bootstrap those no-op writes can overflow the watcher queue
         // and repeatedly trigger full scans of an otherwise unchanged tree.
         if matches!(remote.kind, Kind::File | Kind::Directory)
-            && old.as_ref().is_some_and(|e| e.mode != remote.mode)
+            && old.is_some_and(|e| e.mode != remote.mode)
         {
             root.dir.set_permissions(
                 &remote.path,
@@ -823,7 +867,7 @@ pub fn apply(
             )?;
             root.dir.open(&remote.path)?.into_std().sync_all()?;
         }
-    } else if !old.as_ref().is_some_and(|e| e.same_content(remote)) {
+    } else if !old.is_some_and(|e| e.same_content(remote)) {
         // A tombstone may arrive at a fresh receiver that never had the file.
         // Creating its parents invents directories, which the watcher can then
         // journal as independent local creations and conflict with later deletes.
@@ -832,7 +876,7 @@ pub fn apply(
         }
         match remote.kind {
             Kind::Deleted => {
-                if let Some(e) = &old {
+                if let Some(e) = old {
                     if e.kind == Kind::Directory {
                         match root.dir.remove_dir(&remote.path) {
                             Ok(()) => {}
@@ -843,7 +887,7 @@ pub fn apply(
                             }
                         }
                     } else {
-                        archive(root, &remote.path, "versions", true)?;
+                        archived = archive(root, &remote.path, "versions", true)?;
                     }
                 }
             }
@@ -853,7 +897,7 @@ pub fn apply(
                     .symlink_metadata(&remote.path)
                     .is_ok_and(|m| !m.is_dir() || m.is_symlink())
                 {
-                    archive(root, &remote.path, "versions", true)?;
+                    archived = archive(root, &remote.path, "versions", true)?;
                 }
                 root.dir.create_dir_all(&remote.path)?;
             }
@@ -863,15 +907,15 @@ pub fn apply(
                     remote.target.as_ref().context("missing symlink target")?,
                     &temp_link,
                 )?;
-                archive(root, &remote.path, "versions", false)?;
+                archived = archive(root, &remote.path, "versions", false)?;
                 root.dir.rename(&temp_link, &root.dir, &remote.path)?;
             }
             Kind::File => {
                 let t = temp.context("file changed during negotiation; retry required")?;
-                if old.as_ref().is_none_or(|e| e.kind == Kind::Deleted) {
+                if old.is_none_or(|e| e.kind == Kind::Deleted) {
                     publish_new_file(root, t, &remote.path)?;
                 } else {
-                    archive(root, &remote.path, "versions", false)?;
+                    archived = archive(root, &remote.path, "versions", false)?;
                     root.dir.rename(t, &root.dir, &remote.path)?;
                 }
             }
@@ -883,14 +927,12 @@ pub fn apply(
             )?;
         }
     }
-    if next.kind != Kind::Deleted {
-        next.stamp = stamp(&root.dir.symlink_metadata(&next.path)?);
+    let stamp = if remote.kind == Kind::Deleted {
+        String::new()
     } else {
-        next.stamp.clear();
-    }
-    store::put(c, &root.folder.id, &mut next, 0)?;
-    crate::conflicts::clear_resolved(c, &root.folder.id, &next)?;
-    Ok(false)
+        stamp(&root.dir.symlink_metadata(&remote.path)?)
+    };
+    Ok((stamp, archived))
 }
 
 /// Persist rename/create/delete metadata once per affected directory, before committing the batch cursor.
@@ -1811,5 +1853,79 @@ mod tests {
         );
         assert_eq!(get("a/b/gone").unwrap().kind, Kind::Deleted);
         assert_eq!(get("a/b/new").unwrap().kind, Kind::File);
+    }
+    /// A peer's version, and the verified temp file a receiver would publish it from.
+    fn peer_version(
+        root: &Root,
+        path: &str,
+        data: Option<&[u8]>,
+        clock: u64,
+    ) -> (Entry, Option<String>) {
+        let temp = data.map(|data| {
+            let (temp, mut f) = temp_file(root).unwrap();
+            std::io::Write::write_all(&mut f, data).unwrap();
+            f.set_permissions(std::fs::Permissions::from_mode(0o644))
+                .unwrap();
+            temp
+        });
+        let entry = Entry {
+            path: path.into(),
+            kind: if data.is_some() {
+                Kind::File
+            } else {
+                Kind::Deleted
+            },
+            size: data.map_or(0, |d| d.len() as u64),
+            hash: data.map_or(String::new(), |d| blake3::hash(d).to_hex().to_string()),
+            target: None,
+            mode: 0o644,
+            clock: BTreeMap::from([("b".repeat(64), clock)]),
+            seq: 0,
+            stamp: String::new(),
+        };
+        (entry, temp)
+    }
+    #[test]
+    fn files_published_by_an_uncommitted_batch_are_the_peers_versions() {
+        let (state, files, root, id) = fixture();
+        let mut c = store::open(state.path()).unwrap();
+        for path in ["kept", "edited", "removed"] {
+            let (e, temp) = peer_version(&root, path, Some(b"one"), 1);
+            assert!(!apply(&c, &root, &id, &e, temp.as_deref()).unwrap());
+        }
+        // The receiver records the batch, publishes every file and stops before committing.
+        let batch = [
+            peer_version(&root, "kept", Some(b"two"), 2),
+            peer_version(&root, "edited", Some(b"two"), 2),
+            peer_version(&root, "removed", None, 2),
+        ];
+        let entries: Vec<_> = batch.iter().map(|(e, _)| e.clone()).collect();
+        store::expect_received(&c, "test", &entries).unwrap();
+        let tx = c.transaction().unwrap();
+        for (e, temp) in &batch {
+            apply(&tx, &root, &id, e, temp.as_deref()).unwrap();
+        }
+        drop(tx);
+        let get = |c: &Connection, p: &str| store::get(c, "test", p).unwrap().unwrap();
+        assert_eq!(get(&c, "kept").clock, BTreeMap::from([("b".repeat(64), 1)]));
+        assert!(!files.path().join("removed").exists());
+        // Someone edits one published file before the scanner reaches it.
+        std::fs::write(files.path().join("edited"), b"three").unwrap();
+        scan(&root, state.path(), &id, None, |_| {}).unwrap();
+        let peer = |n| BTreeMap::from([("b".repeat(64), n)]);
+        assert_eq!(get(&c, "kept").clock, peer(2));
+        assert_eq!(get(&c, "kept").hash, entries[0].hash);
+        assert_eq!(get(&c, "removed").kind, Kind::Deleted);
+        assert_eq!(get(&c, "removed").clock, peer(2));
+        let mut edited = peer(1);
+        edited.insert(id.clone(), 1);
+        assert_eq!(get(&c, "edited").clock, edited);
+        assert!(store::received(&c, "test", "kept").unwrap().is_none());
+        assert!(store::received(&c, "test", "edited").unwrap().is_some());
+        // The peer's next version is newer than the adopted one, so it applies cleanly.
+        let (e, temp) = peer_version(&root, "kept", Some(b"three"), 3);
+        assert!(!apply(&c, &root, &id, &e, temp.as_deref()).unwrap());
+        assert_eq!(std::fs::read(files.path().join("kept")).unwrap(), b"three");
+        assert!(crate::conflicts::list(&c).unwrap().is_empty());
     }
 }

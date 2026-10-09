@@ -37,6 +37,12 @@
 - [x] `ysync service status`, `stop` and `start` manage a Homebrew-started daemon when no native service is installed. Linux verification and Homebrew lifecycle automation remain.
 - [ ] A directory replaced by a file or symlink still fails reconciliation of its former children: the folder stays in `error` and that pass records no deletions. Reproduced on 0.4.0 and 0.4.1.
 
+## Completed in 0.4.2
+
+- [x] A batch that publishes files and then never commits no longer leaves them indexed as receiver edits. Incoming versions are recorded before publication and adopted by the next scan or retry when the file matches.
+- [x] `ysync conflict resolve --take-incoming` puts a preserved incoming version in place, archives the local one, and on receive-only folders drops the local counter that made every later version conflict. This is the first part of the receiver revert workflow above; a TUI action and review of local differences that have not conflicted remain.
+- [ ] A file replaced by a directory has a short window between archiving the file and creating the directory. A stop inside it is still indexed as a local deletion.
+
 ## Next performance work
 
 Temperature-aware scanner pause/resume is implemented and covered by controlled tests. A scanner CPU/duty budget independent of worker count and a controlled large-root cooling evaluation remain. The first path-opening optimization is measured in VALIDATION.md; larger controlled follow-up remains. Track initial indexing separately from idle watching and scoped edits. Two hash workers and a later 50% CPU quota did not prevent every Linux trial from reaching its 85°C stop threshold. The server deliberately uses a shallow fan curve: keep temperature control optional, and assess efficiency through CPU seconds, disk reads, repeated work, and idle activity.
